@@ -88,18 +88,21 @@ class BrowserManager:
 
     def fetch_captcha(self) -> tuple[bytes, dict]:
         """返回 (png_bytes, cookies_dict)"""
-        page = self._browser.new_page()
-        try:
-            page.goto(f"{BASE_URL}/PersonalCenter/loginwechat.aspx",
-                      wait_until="networkidle", timeout=15000)
-            captcha_el = page.locator("#yanzhengma")
-            if captcha_el.count() == 0:
-                raise RuntimeError("页面中未找到验证码元素 #yanzhengma")
-            img_bytes = captcha_el.screenshot()
-            cookies = {c["name"]: c["value"] for c in page.context.cookies()}
-            return img_bytes, cookies
-        finally:
-            page.close()
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            page = browser.new_page()
+            try:
+                page.goto(f"{BASE_URL}/PersonalCenter/loginwechat.aspx",
+                          wait_until="networkidle", timeout=15000)
+                captcha_el = page.locator("#yanzhengma")
+                if captcha_el.count() == 0:
+                    raise RuntimeError("页面中未找到验证码元素 #yanzhengma")
+                img_bytes = captcha_el.screenshot()
+                cookies = {c["name"]: c["value"] for c in page.context.cookies()}
+                return img_bytes, cookies
+            finally:
+                page.close()
+                browser.close()
 
     @staticmethod
     def select_seat_and_buy(program_id, event_id, price_id,
@@ -638,8 +641,6 @@ def index():
 def api_captcha():
     """获取验证码图片（启动浏览器 + 截图 + OCR）"""
     try:
-        if not _state["browser"]._browser:
-            _state["browser"].start()
         img_bytes, cookies = _state["browser"].fetch_captcha()
         _state["captcha_cookies"] = cookies
         _state["api"].set_cookies(cookies)
