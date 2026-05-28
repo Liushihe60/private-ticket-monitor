@@ -63,6 +63,14 @@ body{font-family:-apple-system,"Microsoft YaHei","Segoe UI",sans-serif;backgroun
 .btn-outline{background:transparent;border:1px solid var(--border);color:var(--text)}
 .btn-outline:hover{border-color:var(--accent);color:var(--accent)}
 .btn:disabled{opacity:.4;cursor:not-allowed;transform:none}
+.btn-sm{padding:7px 14px;font-size:13px}
+
+/* ─── Captcha ─── */
+.captcha-placeholder{height:40px;width:120px;border-radius:6px;border:1px dashed var(--border);display:flex;align-items:center;justify-content:center;font-size:11px;color:#4a5568;cursor:pointer;transition:all .2s;flex-shrink:0}
+.captcha-placeholder:hover{border-color:var(--accent);color:var(--text2)}
+.captcha-img{height:40px;border-radius:6px;border:1px solid var(--border);cursor:pointer;transition:border .2s;display:none}
+.captcha-img.loaded{display:block}
+.captcha-img:hover{border-color:var(--accent)}
 
 /* ─── Select Group ─── */
 .select-trio{display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px}
@@ -172,7 +180,17 @@ body{font-family:-apple-system,"Microsoft YaHei","Segoe UI",sans-serif;backgroun
             <input id="password" type="password" placeholder="请输入密码">
           </div>
           <div class="form-group full">
-            <button id="btnLogin" class="btn btn-success" onclick="doLogin()" style="width:160px">一键登录</button>
+            <label>验证码</label>
+            <div style="display:flex;align-items:center;gap:12px">
+              <input id="captcha" type="text" placeholder="点击右侧获取" style="width:120px;flex:none">
+              <div id="captchaPlaceholder" class="captcha-placeholder" onclick="getCaptcha()">点击获取</div>
+              <img id="captchaImg" class="captcha-img" src="" onclick="getCaptcha()" title="点击刷新">
+              <button class="btn btn-outline btn-sm" onclick="getCaptcha()">刷新</button>
+              <span id="ocrHint" style="font-size:11px;color:var(--text2)"></span>
+            </div>
+          </div>
+          <div class="form-group full">
+            <button id="btnLogin" class="btn btn-success" onclick="doLogin()" style="width:160px">登 录</button>
             <span id="loginStatus" style="font-size:13px;color:var(--text2);margin-top:6px"></span>
           </div>
         </div>
@@ -343,36 +361,41 @@ async function api(url, opts) {
 }
 
 // ─── 登录 ───
+async function getCaptcha() {
+  let r = await api('/api/captcha', {method:'POST'});
+  if (r.ok) {
+    let img = document.getElementById('captchaImg');
+    let ph = document.getElementById('captchaPlaceholder');
+    img.src = 'data:image/png;base64,' + r.image;
+    img.classList.add('loaded');
+    ph.style.display = 'none';
+    document.getElementById('captcha').value = r.ocr || '';
+    document.getElementById('ocrHint').textContent = r.ocr ? 'OCR: ' + r.ocr : '';
+  } else {
+    toast('获取验证码失败: ' + r.msg, false);
+  }
+}
+
 async function doLogin() {
   let phone = document.getElementById('phone').value.trim();
   let pwd = document.getElementById('password').value.trim();
-  if (!phone || !pwd) { toast('请填写手机号和密码', false); return; }
-  let btn = document.getElementById('btnLogin');
-  btn.disabled = true;
-  btn.textContent = '登录中...';
-  document.getElementById('loginStatus').textContent = '正在自动识别验证码并登录，请稍候...';
-  document.getElementById('loginStatus').style.color = 'var(--text2)';
-  try {
-    let r = await api('/api/login', {
-      method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({phone, password: pwd})
-    });
-    if (r.ok) {
-      document.getElementById('loginStatus').textContent = '登录成功';
-      document.getElementById('loginStatus').style.color = 'var(--green)';
-      toast('登录成功', true);
-    } else {
-      document.getElementById('loginStatus').textContent = '失败: ' + r.msg;
-      document.getElementById('loginStatus').style.color = 'var(--red)';
-      toast('登录失败: ' + r.msg, false);
-    }
-  } catch(e) {
-    document.getElementById('loginStatus').textContent = '请求异常';
+  let captcha = document.getElementById('captcha').value.trim();
+  if (!phone || !pwd || !captcha) { toast('请填写完整登录信息', false); return; }
+  document.getElementById('loginStatus').textContent = '登录中...';
+  let r = await api('/api/login', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({phone, password: pwd, captcha})
+  });
+  if (r.ok) {
+    document.getElementById('loginStatus').textContent = '登录成功';
+    document.getElementById('loginStatus').style.color = 'var(--green)';
+    toast('登录成功', true);
+  } else {
+    document.getElementById('loginStatus').textContent = '失败: ' + r.msg;
     document.getElementById('loginStatus').style.color = 'var(--red)';
-    toast('请求异常: ' + e.message, false);
+    toast('登录失败: ' + r.msg, false);
+    getCaptcha();
   }
-  btn.disabled = false;
-  btn.textContent = '一键登录';
 }
 
 // ─── 选择演出 ───

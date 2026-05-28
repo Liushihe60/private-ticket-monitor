@@ -691,21 +691,17 @@ def api_captcha():
 @app.route("/api/login", methods=["POST"])
 def api_login():
     d = request.json
-    phone, pwd = d.get("phone", ""), d.get("password", "")
-    if not phone or not pwd:
-        return jsonify({"ok": False, "msg": "请填写手机号和密码"})
+    phone, pwd, captcha = d.get("phone", ""), d.get("password", ""), d.get("captcha", "")
+    if not phone or not pwd or not captcha:
+        return jsonify({"ok": False, "msg": "请填写完整登录信息"})
     try:
-        log("开始一键登录...")
-        ok, msg_or_token, cookies = BrowserManager.login_with_captcha(
-            phone, pwd, _state["ocr"])
-        if ok:
-            _state["api"].token = msg_or_token
-            _state["api"].set_cookies(cookies)
-            _state["captcha_cookies"] = cookies
-            log(f"登录成功 token={msg_or_token[:12]}...")
+        result = _state["api"].login(phone, pwd, captcha)
+        if result.get("code") == 0 and result.get("iRtn") == 0:
+            log(f"登录成功 token={_state['api'].token[:12]}...")
             return jsonify({"ok": True})
-        log(f"登录失败: {msg_or_token}")
-        return jsonify({"ok": False, "msg": msg_or_token})
+        msg = result.get("msg", "登录失败")
+        log(f"登录失败: {msg}")
+        return jsonify({"ok": False, "msg": msg})
     except Exception as e:
         log(f"登录异常: {e}")
         return jsonify({"ok": False, "msg": str(e)})
