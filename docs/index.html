@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>上海文化广场 余票监测</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, "Microsoft YaHei", sans-serif; background: #f5f5f5; color: #333; }
+.header { background: #1a1a2e; color: #fff; padding: 12px 24px; display: flex; align-items: center; justify-content: space-between; }
+.header h1 { font-size: 18px; font-weight: 500; }
+.header .status { font-size: 13px; padding: 4px 12px; border-radius: 12px; }
+.status-idle { background: #666; }
+.status-running { background: #e74c3c; animation: pulse 1.5s infinite; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.6; } }
+
+.container { max-width: 960px; margin: 16px auto; padding: 0 16px; }
+.tabs { display: flex; gap: 4px; margin-bottom: 0; }
+.tab { padding: 10px 20px; background: #ddd; border: none; border-radius: 8px 8px 0 0; cursor: pointer; font-size: 14px; }
+.tab.active { background: #fff; font-weight: 600; }
+.panel { display: none; background: #fff; border-radius: 0 8px 8px 8px; padding: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+.panel.active { display: block; }
+
+.form-row { margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
+.form-row label { width: 70px; text-align: right; font-size: 14px; flex-shrink: 0; }
+.form-row input, .form-row select { flex: 1; padding: 8px 10px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px; }
+.form-row input[type="number"] { width: 80px; flex: none; }
+.btn { padding: 8px 16px; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; }
+.btn-primary { background: #3498db; color: #fff; }
+.btn-primary:hover { background: #2980b9; }
+.btn-success { background: #27ae60; color: #fff; }
+.btn-success:hover { background: #219a52; }
+.btn-danger { background: #e74c3c; color: #fff; }
+.btn-danger:hover { background: #c0392b; }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.captcha-row { display: flex; align-items: center; gap: 8px; }
+.captcha-img { height: 40px; border: 1px solid #ccc; border-radius: 4px; cursor: pointer; }
+
+.select-group { display: flex; gap: 12px; }
+.select-group > div { flex: 1; }
+.select-group label { display: block; font-size: 13px; color: #666; margin-bottom: 4px; }
+.select-group select { width: 100%; padding: 6px; border: 1px solid #ccc; border-radius: 4px; font-size: 13px; }
+
+.selection-info { background: #f0f8ff; padding: 10px; border-radius: 4px; margin-top: 12px; font-size: 14px; }
+
+.log-box { background: #1a1a2e; color: #0f0; font-family: "Consolas", "Courier New", monospace; font-size: 12px;
+           padding: 12px; border-radius: 4px; height: 320px; overflow-y: auto; line-height: 1.5; margin-top: 12px; white-space: pre-wrap; word-break: break-all; }
+
+.push-section { margin-bottom: 16px; }
+.push-section h3 { font-size: 14px; margin-bottom: 8px; color: #555; }
+.radio-group { display: flex; gap: 16px; margin-bottom: 8px; }
+.radio-group label { font-size: 14px; cursor: pointer; }
+
+.toast { position: fixed; top: 20px; right: 20px; padding: 12px 20px; border-radius: 6px; color: #fff; font-size: 14px;
+         z-index: 9999; animation: fadeIn 0.3s; }
+.toast-ok { background: #27ae60; }
+.toast-err { background: #e74c3c; }
+@keyframes fadeIn { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>上海文化广场 余票监测</h1>
+  <span id="statusBadge" class="status status-idle">未运行</span>
+</div>
+
+<div class="container">
+  <div class="tabs">
+    <button class="tab active" onclick="switchTab(0)">登录</button>
+    <button class="tab" onclick="switchTab(1)">选择演出</button>
+    <button class="tab" onclick="switchTab(2)">余票监测</button>
+    <button class="tab" onclick="switchTab(3)">微信推送</button>
+  </div>
+
+  <!-- Tab 0: 登录 -->
+  <div class="panel active" id="panel0">
+    <div class="form-row">
+      <label>手机号</label>
+      <input id="phone" type="text" placeholder="请输入手机号">
+    </div>
+    <div class="form-row">
+      <label>密码</label>
+      <input id="password" type="password" placeholder="请输入密码">
+    </div>
+    <div class="form-row">
+      <label>验证码</label>
+      <div class="captcha-row">
+        <input id="captcha" type="text" placeholder="验证码" style="width:120px;flex:none">
+        <img id="captchaImg" class="captcha-img" src="" alt="点击获取验证码" onclick="getCaptcha()" title="点击刷新">
+        <button class="btn btn-primary" onclick="getCaptcha()">获取验证码</button>
+        <span id="ocrHint" style="font-size:12px;color:#999"></span>
+      </div>
+    </div>
+    <div class="form-row">
+      <label></label>
+      <button class="btn btn-success" onclick="doLogin()">登 录</button>
+      <span id="loginStatus" style="font-size:13px;color:#999"></span>
+    </div>
+  </div>
+
+  <!-- Tab 1: 选择演出 -->
+  <div class="panel" id="panel1">
+    <button class="btn btn-primary" onclick="loadPrograms()" style="margin-bottom:12px">加载可购票剧目</button>
+    <div class="select-group">
+      <div>
+        <label>① 剧目</label>
+        <select id="selProgram" size="10" onchange="onProgramChange()"></select>
+      </div>
+      <div>
+        <label>② 场次</label>
+        <select id="selEvent" size="10" onchange="onEventChange()"></select>
+      </div>
+      <div>
+        <label>③ 票档</label>
+        <select id="selPrice" size="10" onchange="onPriceChange()"></select>
+      </div>
+    </div>
+    <div class="selection-info" id="selectionInfo">当前未选择</div>
+  </div>
+
+  <!-- Tab 2: 监测 -->
+  <div class="panel" id="panel2">
+    <div class="form-row">
+      <label>刷新间隔</label>
+      <input id="interval" type="number" value="3" min="1" max="60" style="width:80px;flex:none"> 秒
+      <label style="width:auto;margin-left:16px">购买数量</label>
+      <input id="qty" type="number" value="1" min="1" max="4" style="width:60px;flex:none">
+    </div>
+    <div class="form-row">
+      <label></label>
+      <button id="btnStart" class="btn btn-success" onclick="startMonitor()">开始监测</button>
+      <button id="btnStop" class="btn btn-danger" onclick="stopMonitor()" disabled>停止监测</button>
+      <span id="monitorSel" style="font-size:13px;color:#999;margin-left:12px"></span>
+    </div>
+    <div class="log-box" id="logBox"></div>
+  </div>
+
+  <!-- Tab 3: 推送 -->
+  <div class="panel" id="panel3">
+    <div class="push-section">
+      <h3>推送方式</h3>
+      <div class="radio-group">
+        <label><input type="radio" name="pushMethod" value="wxpusher" checked> WxPusher（推荐）</label>
+        <label><input type="radio" name="pushMethod" value="serverchan"> Server酱</label>
+        <label><input type="radio" name="pushMethod" value="pushplus"> PushPlus</label>
+      </div>
+    </div>
+    <div class="push-section">
+      <h3>Token / Key</h3>
+      <input id="pushKey" type="text" placeholder="WxPusher appToken / Server酱 SendKey / PushPlus Token" style="width:100%;padding:8px;border:1px solid #ccc;border-radius:4px">
+    </div>
+    <div class="push-section">
+      <h3>WxPusher UID</h3>
+      <input id="pushUid" type="text" placeholder="仅 WxPusher 需要" style="width:100%;padding:8px;border:1px solid #ccc;border-radius:4px">
+    </div>
+    <div class="form-row">
+      <button class="btn btn-primary" onclick="savePush()">保存配置</button>
+      <button class="btn" onclick="testPush()" style="background:#f39c12;color:#fff">发送测试</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ─── 服务器地址（修改此处指向你的后端）───
+const API_BASE = 'http://49.235.110.106:5000';
+
+// ─── Tab 切换 ───
+function switchTab(i) {
+  document.querySelectorAll('.tab').forEach((t,idx) => t.classList.toggle('active', idx===i));
+  document.querySelectorAll('.panel').forEach((p,idx) => p.classList.toggle('active', idx===i));
+}
+
+// ─── Toast ───
+function toast(msg, ok) {
+  let el = document.createElement('div');
+  el.className = 'toast ' + (ok ? 'toast-ok' : 'toast-err');
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 3000);
+}
+
+// ─── SSE 日志 ───
+let logBox = document.getElementById('logBox');
+let evtSource = null;
+function connectSSE() {
+  if (evtSource) evtSource.close();
+  evtSource = new EventSource(API_BASE + '/api/logs/stream');
+  evtSource.onmessage = function(e) {
+    try {
+      let d = JSON.parse(e.data);
+      let line = document.createElement('div');
+      line.textContent = d.msg;
+      logBox.appendChild(line);
+      if (logBox.children.length > 500) logBox.removeChild(logBox.firstChild);
+      logBox.scrollTop = logBox.scrollHeight;
+    } catch(err) {}
+  };
+  evtSource.onerror = function() {
+    setTimeout(connectSSE, 3000);
+  };
+}
+connectSSE();
+
+// ─── API 调用 ───
+async function api(url, opts) {
+  let resp = await fetch(API_BASE + url, opts);
+  return await resp.json();
+}
+
+// ─── 登录 ───
+async function getCaptcha() {
+  let r = await api('/api/captcha', {method:'POST'});
+  if (r.ok) {
+    document.getElementById('captchaImg').src = 'data:image/png;base64,' + r.image;
+    document.getElementById('captcha').value = r.ocr || '';
+    document.getElementById('ocrHint').textContent = r.ocr ? 'OCR: ' + r.ocr : '';
+  } else {
+    toast('获取验证码失败: ' + r.msg, false);
+  }
+}
+
+async function doLogin() {
+  let phone = document.getElementById('phone').value.trim();
+  let pwd = document.getElementById('password').value.trim();
+  let captcha = document.getElementById('captcha').value.trim();
+  if (!phone || !pwd || !captcha) { toast('请填写完整登录信息', false); return; }
+  document.getElementById('loginStatus').textContent = '登录中...';
+  let r = await api('/api/login', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({phone, password: pwd, captcha})
+  });
+  if (r.ok) {
+    document.getElementById('loginStatus').textContent = '登录成功';
+    document.getElementById('loginStatus').style.color = '#27ae60';
+    toast('登录成功', true);
+  } else {
+    document.getElementById('loginStatus').textContent = '失败: ' + r.msg;
+    document.getElementById('loginStatus').style.color = '#e74c3c';
+    toast('登录失败: ' + r.msg, false);
+    getCaptcha();
+  }
+}
+
+// ─── 选择演出 ───
+let programs = [], events = [], prices = [];
+let selProgramId = null, selEventId = null, selPriceId = null, selPriceInfo = null;
+
+async function loadPrograms() {
+  let r = await api('/api/programs');
+  if (!r.ok) { toast(r.msg, false); return; }
+  programs = r.data;
+  let sel = document.getElementById('selProgram');
+  sel.innerHTML = '';
+  programs.forEach(p => {
+    let opt = document.createElement('option');
+    opt.value = p.id; opt.textContent = p.name;
+    sel.appendChild(opt);
+  });
+}
+
+async function onProgramChange() {
+  let sel = document.getElementById('selProgram');
+  let pid = parseInt(sel.value);
+  if (!pid) return;
+  selProgramId = pid;
+  let r = await api('/api/events/' + pid);
+  if (!r.ok) { toast(r.msg, false); return; }
+  events = r.data;
+  let esel = document.getElementById('selEvent');
+  esel.innerHTML = '';
+  document.getElementById('selPrice').innerHTML = '';
+  events.forEach(e => {
+    let opt = document.createElement('option');
+    opt.value = e.event_id;
+    let status = e.if_begin === 1 ? '可购' : e.if_begin === 2 ? '已结束' : '未开售';
+    let st = e.select_seat === 1 ? '选座' : '无座';
+    opt.textContent = `${e.datetime.slice(0,16)} ${e.week} [${status}] ${st} 余:${e.seat_cnt.toFixed(0)}`;
+    esel.appendChild(opt);
+  });
+  updateSelectionInfo();
+}
+
+async function onEventChange() {
+  let sel = document.getElementById('selEvent');
+  let eid = parseInt(sel.value);
+  if (!eid) return;
+  selEventId = eid;
+  let r = await api('/api/prices/' + eid);
+  if (!r.ok) { toast(r.msg, false); return; }
+  prices = r.data;
+  let psel = document.getElementById('selPrice');
+  psel.innerHTML = '';
+  prices.forEach(p => {
+    let opt = document.createElement('option');
+    opt.value = p.price_id;
+    let sold = p.sold_out ? '已售罄' : '有票';
+    opt.textContent = `¥${p.price_amt.toFixed(0)} ${p.desc} ${p.remark} [${sold}]`;
+    psel.appendChild(opt);
+  });
+  updateSelectionInfo();
+}
+
+async function onPriceChange() {
+  let sel = document.getElementById('selPrice');
+  let pid = parseInt(sel.value);
+  if (!pid) return;
+  selPriceId = pid;
+  for (let p of prices) {
+    if (p.price_id === pid) { selPriceInfo = p; break; }
+  }
+  await api('/api/select_price', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({price_id: pid})
+  });
+  updateSelectionInfo();
+}
+
+function updateSelectionInfo() {
+  let parts = [];
+  if (selProgramId) {
+    for (let p of programs) { if (p.id === selProgramId) { parts.push(p.name); break; } }
+  }
+  if (selEventId) {
+    for (let e of events) { if (e.event_id === selEventId) { parts.push(e.datetime.slice(0,16)); break; } }
+  }
+  if (selPriceInfo) parts.push('¥' + selPriceInfo.price_amt.toFixed(0));
+  let text = parts.length ? parts.join(' → ') : '当前未选择';
+  document.getElementById('selectionInfo').textContent = text;
+  document.getElementById('monitorSel').textContent = text;
+}
+
+// ─── 监测 ───
+let monitoring = false;
+
+async function startMonitor() {
+  let interval = parseInt(document.getElementById('interval').value) || 3;
+  let qty = parseInt(document.getElementById('qty').value) || 1;
+  let r = await api('/api/monitor/start', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({interval, qty})
+  });
+  if (r.ok) {
+    setMonitorState(true);
+  } else {
+    toast(r.msg, false);
+  }
+}
+
+async function stopMonitor() {
+  await api('/api/monitor/stop', {method: 'POST'});
+  setMonitorState(false);
+}
+
+function setMonitorState(running) {
+  monitoring = running;
+  document.getElementById('btnStart').disabled = running;
+  document.getElementById('btnStop').disabled = !running;
+  let badge = document.getElementById('statusBadge');
+  badge.textContent = running ? '监测中' : '未运行';
+  badge.className = 'status ' + (running ? 'status-running' : 'status-idle');
+}
+
+// 定时刷新监测状态
+setInterval(async () => {
+  try {
+    let r = await api('/api/monitor/status');
+    setMonitorState(r.monitoring);
+  } catch(e) {}
+}, 5000);
+
+// ─── 推送 ───
+async function savePush() {
+  let method = document.querySelector('input[name="pushMethod"]:checked').value;
+  let key = document.getElementById('pushKey').value.trim();
+  let uid = document.getElementById('pushUid').value.trim();
+  let r = await api('/api/push/config', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({method, key, uid})
+  });
+  toast(r.ok ? '配置已保存' : r.msg, r.ok);
+}
+
+async function testPush() {
+  await savePush();
+  let r = await api('/api/push/test', {method: 'POST'});
+  toast(r.msg, r.ok);
+}
+</script>
+</body>
+</html>
