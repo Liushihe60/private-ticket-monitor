@@ -105,6 +105,41 @@ class BrowserManager:
                 browser.close()
 
     @staticmethod
+    def login_with_captcha(username: str, password: str, ocr_engine) -> tuple[bool, str, dict]:
+        """一键登录：Playwright 获取验证码 + OCR + HTTP 登录，返回 (成功, 消息, cookies)"""
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            page = browser.new_page()
+            try:
+                page.goto(f"{BASE_URL}/PersonalCenter/loginwechat.aspx",
+                          wait_until="networkidle", timeout=15000)
+                captcha_el = page.locator("#yanzhengma")
+                if captcha_el.count() == 0:
+                    return False, "页面中未找到验证码元素", {}
+                img_bytes = captcha_el.screenshot()
+                cookies = {c["name"]: c["value"] for c in page.context.cookies()}
+                captcha_text = ocr_engine.classification(img_bytes)
+                log(f"验证码 OCR 识别: {captcha_text}")
+            finally:
+                page.close()
+                browser.close()
+
+        # 用 requests 发送登录请求
+        import requests as req
+        session = req.Session()
+        for name, value in cookies.items():
+            session.cookies.set(name, value, domain="m.shcstheatre.com")
+        login_url = f"{BASE_URL}/WebAPIWeChat.ashx?op=CustomerLoginWeChat"
+        data = {"username": username, "newpassword": password,
+                "loginsurecode": captcha_text, "sessioncode": captcha_text,
+                "cookieOP_ID": "", "OPEND_ID_COOKIE": ""}
+        resp = session.post(login_url, data=data)
+        result = resp.json()
+        if result.get("code") == 0 and result.get("iRtn") == 0:
+            return True, result.get("token", ""), cookies
+        return False, result.get("msg", "登录失败"), {}
+
+    @staticmethod
     def select_seat_and_buy(program_id, event_id, price_id,
                             cookies, token, qty=1, log_callback=None):
         def _do_select():
@@ -656,17 +691,21 @@ def api_captcha():
 @app.route("/api/login", methods=["POST"])
 def api_login():
     d = request.json
-    phone, pwd, captcha = d.get("phone", ""), d.get("password", ""), d.get("captcha", "")
-    if not phone or not pwd or not captcha:
-        return jsonify({"ok": False, "msg": "请填写完整登录信息"})
+    phone, pwd = d.get("phone", ""), d.get("password", "")
+    if not phone or not pwd:
+        return jsonify({"ok": False, "msg": "请填写手机号和密码"})
     try:
-        result = _state["api"].login(phone, pwd, captcha)
-        if result.get("code") == 0 and result.get("iRtn") == 0:
-            log(f"登录成功 token={_state['api'].token[:12]}...")
+        log("开始一键登录...")
+        ok, msg_or_token, cookies = BrowserManager.login_with_captcha(
+            phone, pwd, _state["ocr"])
+        if ok:
+            _state["api"].token = msg_or_token
+            _state["api"].set_cookies(cookies)
+            _state["captcha_cookies"] = cookies
+            log(f"登录成功 token={msg_or_token[:12]}...")
             return jsonify({"ok": True})
-        msg = result.get("msg", "登录失败")
-        log(f"登录失败: {msg}")
-        return jsonify({"ok": False, "msg": msg})
+        log(f"登录失败: {msg_or_token}")
+        return jsonify({"ok": False, "msg": msg_or_token})
     except Exception as e:
         log(f"登录异常: {e}")
         return jsonify({"ok": False, "msg": str(e)})
