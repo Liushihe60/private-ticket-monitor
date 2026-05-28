@@ -5,180 +5,303 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>上海文化广场 余票监测</title>
 <style>
-* { margin: 0; padding: 0; box-sizing: border-box; }
-body { font-family: -apple-system, "Microsoft YaHei", sans-serif; background: #f5f5f5; color: #333; }
-.header { background: #1a1a2e; color: #fff; padding: 12px 24px; display: flex; align-items: center; justify-content: space-between; }
-.header h1 { font-size: 18px; font-weight: 500; }
-.header .status { font-size: 13px; padding: 4px 12px; border-radius: 12px; }
-.status-idle { background: #666; }
-.status-running { background: #e74c3c; animation: pulse 1.5s infinite; }
-@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.6; } }
+*{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --bg:#0f0f1a;--card:#1a1a2e;--card2:#16213e;
+  --accent:#6c63ff;--accent2:#3b82f6;--green:#10b981;--red:#ef4444;
+  --text:#e2e8f0;--text2:#94a3b8;--border:#2d2d44;
+}
+body{font-family:-apple-system,"Microsoft YaHei","Segoe UI",sans-serif;background:var(--bg);color:var(--text);min-height:100vh;display:flex}
 
-.container { max-width: 960px; margin: 16px auto; padding: 0 16px; }
-.tabs { display: flex; gap: 4px; margin-bottom: 0; }
-.tab { padding: 10px 20px; background: #ddd; border: none; border-radius: 8px 8px 0 0; cursor: pointer; font-size: 14px; }
-.tab.active { background: #fff; font-weight: 600; }
-.panel { display: none; background: #fff; border-radius: 0 8px 8px 8px; padding: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
-.panel.active { display: block; }
+/* ─── Sidebar ─── */
+.sidebar{width:220px;background:var(--card);border-right:1px solid var(--border);display:flex;flex-direction:column;flex-shrink:0}
+.sidebar-brand{padding:24px 20px;border-bottom:1px solid var(--border)}
+.sidebar-brand h1{font-size:16px;font-weight:600;color:#fff}
+.sidebar-brand p{font-size:11px;color:var(--text2);margin-top:4px}
+.sidebar-nav{flex:1;padding:12px 0}
+.nav-item{display:flex;align-items:center;gap:10px;padding:12px 20px;cursor:pointer;font-size:14px;color:var(--text2);transition:all .2s;border-left:3px solid transparent}
+.nav-item:hover{background:rgba(108,99,255,.08);color:var(--text)}
+.nav-item.active{background:rgba(108,99,255,.12);color:var(--accent);border-left-color:var(--accent);font-weight:600}
+.nav-icon{width:20px;text-align:center;font-size:16px}
+.sidebar-footer{padding:16px 20px;border-top:1px solid var(--border);display:flex;align-items:center;gap:8px}
+.status-dot{width:8px;height:8px;border-radius:50%;background:#666}
+.status-dot.on{background:var(--green);box-shadow:0 0 8px var(--green);animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+.status-text{font-size:12px;color:var(--text2)}
 
-.form-row { margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
-.form-row label { width: 70px; text-align: right; font-size: 14px; flex-shrink: 0; }
-.form-row input, .form-row select { flex: 1; padding: 8px 10px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px; }
-.form-row input[type="number"] { width: 80px; flex: none; }
-.btn { padding: 8px 16px; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; }
-.btn-primary { background: #3498db; color: #fff; }
-.btn-primary:hover { background: #2980b9; }
-.btn-success { background: #27ae60; color: #fff; }
-.btn-success:hover { background: #219a52; }
-.btn-danger { background: #e74c3c; color: #fff; }
-.btn-danger:hover { background: #c0392b; }
-.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+/* ─── Main ─── */
+.main{flex:1;display:flex;flex-direction:column;overflow:hidden}
+.topbar{padding:16px 28px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+.topbar h2{font-size:18px;font-weight:600}
+.topbar .badge{font-size:11px;padding:3px 10px;border-radius:10px;background:var(--border);color:var(--text2)}
+.topbar .badge.live{background:rgba(239,68,68,.15);color:var(--red);animation:pulse 2s infinite}
+.content{flex:1;padding:24px 28px;overflow-y:auto}
 
-.captcha-row { display: flex; align-items: center; gap: 8px; }
-.captcha-placeholder { height: 40px; width: 120px; border: 1px dashed #ccc; border-radius: 4px; display: flex; align-items: center; justify-content: center; font-size: 12px; color: #999; cursor: pointer; transition: all .2s; flex-shrink: 0; }
-.captcha-placeholder:hover { border-color: #3498db; color: #666; }
-.captcha-img { height: 40px; border: 1px solid #ccc; border-radius: 4px; cursor: pointer; display: none; }
-.captcha-img.loaded { display: block; }
+/* ─── Cards ─── */
+.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:20px}
+.card-title{font-size:15px;font-weight:600;margin-bottom:16px;display:flex;align-items:center;gap:8px}
+.card-title .icon{font-size:18px}
 
-select[multiple] { height: 200px; }
-.select-group { display: flex; gap: 12px; }
-.select-group > div { flex: 1; }
-.select-group label { display: block; font-size: 13px; color: #666; margin-bottom: 4px; }
-.select-group select { width: 100%; padding: 6px; border: 1px solid #ccc; border-radius: 4px; font-size: 13px; }
+/* ─── Forms ─── */
+.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.form-group{display:flex;flex-direction:column;gap:6px}
+.form-group.full{grid-column:1/-1}
+.form-group label{font-size:13px;color:var(--text2);font-weight:500}
+.form-group input,.form-group select{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px 14px;color:var(--text);font-size:14px;outline:none;transition:border .2s}
+.form-group input:focus,.form-group select:focus{border-color:var(--accent)}
+.form-group input::placeholder{color:#4a5568}
 
-.selection-info { background: #f0f8ff; padding: 10px; border-radius: 4px; margin-top: 12px; font-size: 14px; }
+/* ─── Buttons ─── */
+.btn{padding:10px 20px;border:none;border-radius:8px;cursor:pointer;font-size:14px;font-weight:500;transition:all .2s;display:inline-flex;align-items:center;gap:6px}
+.btn:active{transform:scale(.97)}
+.btn-primary{background:var(--accent);color:#fff}
+.btn-primary:hover{background:#5b54e8}
+.btn-success{background:var(--green);color:#fff}
+.btn-success:hover{background:#059669}
+.btn-danger{background:var(--red);color:#fff}
+.btn-danger:hover{background:#dc2626}
+.btn-outline{background:transparent;border:1px solid var(--border);color:var(--text)}
+.btn-outline:hover{border-color:var(--accent);color:var(--accent)}
+.btn:disabled{opacity:.4;cursor:not-allowed;transform:none}
 
-.log-box { background: #1a1a2e; color: #0f0; font-family: "Consolas", "Courier New", monospace; font-size: 12px;
-           padding: 12px; border-radius: 4px; height: 320px; overflow-y: auto; line-height: 1.5; margin-top: 12px; white-space: pre-wrap; word-break: break-all; }
+/* ─── Select Group ─── */
+.select-trio{display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px}
+.select-col label{display:block;font-size:13px;color:var(--text2);margin-bottom:6px;font-weight:500}
+.select-col select{width:100%;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:8px;color:var(--text);font-size:13px;outline:none}
+.select-col select:focus{border-color:var(--accent)}
+.select-col select option{background:var(--bg);padding:4px}
 
-.push-section { margin-bottom: 16px; }
-.push-section h3 { font-size: 14px; margin-bottom: 8px; color: #555; }
-.radio-group { display: flex; gap: 16px; margin-bottom: 8px; }
-.radio-group label { font-size: 14px; cursor: pointer; }
+.selection-bar{background:linear-gradient(135deg,rgba(108,99,255,.1),rgba(59,130,246,.1));border:1px solid rgba(108,99,255,.2);border-radius:8px;padding:12px 16px;margin-top:16px;font-size:13px;display:flex;align-items:center;gap:8px}
+.selection-bar::before{content:"\2726";color:var(--accent)}
 
-.toast { position: fixed; top: 20px; right: 20px; padding: 12px 20px; border-radius: 6px; color: #fff; font-size: 14px;
-         z-index: 9999; animation: fadeIn 0.3s; }
-.toast-ok { background: #27ae60; }
-.toast-err { background: #e74c3c; }
-@keyframes fadeIn { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
+/* ─── Monitor ─── */
+.monitor-controls{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:16px}
+.monitor-controls .form-group{flex:none}
+.monitor-controls .sep{width:1px;height:24px;background:var(--border)}
+.log-box{background:#0a0a14;border:1px solid var(--border);border-radius:8px;height:360px;overflow-y:auto;padding:16px;font-family:"Cascadia Code","Fira Code","Consolas",monospace;font-size:12px;line-height:1.7;white-space:pre-wrap;word-break:break-all}
+.log-line{color:#4ade80}
+.log-line .ts{color:#475569}
+.log-line .err{color:var(--red)}
+.log-line .warn{color:#fbbf24}
+.log-line .ok{color:var(--green)}
+
+/* ─── Push ─── */
+.radio-cards{display:flex;gap:12px;margin-bottom:16px}
+.radio-card{flex:1;background:var(--bg);border:2px solid var(--border);border-radius:10px;padding:16px;cursor:pointer;text-align:center;transition:all .2s}
+.radio-card:hover{border-color:rgba(108,99,255,.4)}
+.radio-card.active{border-color:var(--accent);background:rgba(108,99,255,.08)}
+.radio-card input{display:none}
+.radio-card .rc-icon{font-size:24px;margin-bottom:6px}
+.radio-card .rc-label{font-size:13px;font-weight:600}
+.radio-card .rc-desc{font-size:11px;color:var(--text2);margin-top:4px}
+
+/* ─── Toast ─── */
+.toast{position:fixed;top:20px;right:20px;padding:14px 22px;border-radius:10px;color:#fff;font-size:14px;z-index:9999;animation:slideIn .3s;display:flex;align-items:center;gap:8px;backdrop-filter:blur(8px)}
+.toast-ok{background:rgba(16,185,129,.9)}
+.toast-err{background:rgba(239,68,68,.9)}
+@keyframes slideIn{from{opacity:0;transform:translateX(20px)}to{opacity:1;transform:translateX(0)}}
+
+/* ─── Panel ─── */
+.panel{display:none}
+.panel.active{display:block;animation:fadeIn .3s}
+@keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+
+/* ─── Responsive ─── */
+@media(max-width:768px){
+  body{flex-direction:column}
+  .sidebar{width:100%;flex-direction:row;border-right:none;border-bottom:1px solid var(--border)}
+  .sidebar-brand{display:none}
+  .sidebar-nav{display:flex;padding:0;flex:1}
+  .nav-item{flex:1;justify-content:center;padding:14px 0;border-left:none;border-bottom:3px solid transparent}
+  .nav-item.active{border-bottom-color:var(--accent);border-left-color:transparent}
+  .content{padding:16px}
+  .form-grid{grid-template-columns:1fr}
+  .select-trio{grid-template-columns:1fr}
+  .radio-cards{flex-direction:column}
+}
 </style>
 </head>
 <body>
 
-<div class="header">
-  <h1>上海文化广场 余票监测</h1>
-  <span id="statusBadge" class="status status-idle">未运行</span>
+<!-- Sidebar -->
+<div class="sidebar">
+  <div class="sidebar-brand">
+    <h1>余票监测</h1>
+    <p>上海文化广场</p>
+  </div>
+  <div class="sidebar-nav">
+    <div class="nav-item active" onclick="switchTab(0)">
+      <span class="nav-icon">&#x1F513;</span><span>账号登录</span>
+    </div>
+    <div class="nav-item" onclick="switchTab(1)">
+      <span class="nav-icon">&#x1F3AD;</span><span>选择演出</span>
+    </div>
+    <div class="nav-item" onclick="switchTab(2)">
+      <span class="nav-icon">&#x1F4E1;</span><span>余票监测</span>
+    </div>
+    <div class="nav-item" onclick="switchTab(3)">
+      <span class="nav-icon">&#x1F4F1;</span><span>微信推送</span>
+    </div>
+  </div>
+  <div class="sidebar-footer">
+    <div class="status-dot" id="statusDot"></div>
+    <span class="status-text" id="statusText">未运行</span>
+  </div>
 </div>
 
-<div class="container">
-  <div class="tabs">
-    <button class="tab active" onclick="switchTab(0)">登录</button>
-    <button class="tab" onclick="switchTab(1)">选择演出</button>
-    <button class="tab" onclick="switchTab(2)">余票监测</button>
-    <button class="tab" onclick="switchTab(3)">微信推送</button>
+<!-- Main -->
+<div class="main">
+  <div class="topbar">
+    <h2 id="pageTitle">账号登录</h2>
+    <span class="badge" id="topBadge">IDLE</span>
   </div>
 
-  <!-- Tab 0: 登录 -->
-  <div class="panel active" id="panel0">
-    <div class="form-row">
-      <label>手机号</label>
-      <input id="phone" type="text" placeholder="请输入手机号">
-    </div>
-    <div class="form-row">
-      <label>密码</label>
-      <input id="password" type="password" placeholder="请输入密码">
-    </div>
-    <div class="form-row">
-      <label>验证码</label>
-      <div class="captcha-row">
-        <input id="captcha" type="text" placeholder="验证码" style="width:120px;flex:none">
-        <div id="captchaPlaceholder" class="captcha-placeholder" onclick="getCaptcha()">点击获取</div>
-        <img id="captchaImg" class="captcha-img" src="" alt="验证码" onclick="getCaptcha()" title="点击刷新">
-        <button class="btn btn-primary" onclick="getCaptcha()">获取验证码</button>
-        <span id="ocrHint" style="font-size:12px;color:#999"></span>
-      </div>
-    </div>
-    <div class="form-row">
-      <label></label>
-      <button class="btn btn-success" onclick="doLogin()">登 录</button>
-      <span id="loginStatus" style="font-size:13px;color:#999"></span>
-    </div>
-  </div>
+  <div class="content">
 
-  <!-- Tab 1: 选择演出 -->
-  <div class="panel" id="panel1">
-    <button class="btn btn-primary" onclick="loadPrograms()" style="margin-bottom:12px">加载可购票剧目</button>
-    <div class="select-group">
-      <div>
-        <label>① 剧目</label>
-        <select id="selProgram" size="10" onchange="onProgramChange()"></select>
-      </div>
-      <div>
-        <label>② 场次</label>
-        <select id="selEvent" size="10" onchange="onEventChange()"></select>
-      </div>
-      <div>
-        <label>③ 票档</label>
-        <select id="selPrice" size="10" onchange="onPriceChange()"></select>
+    <!-- Tab 0: 登录 -->
+    <div class="panel active" id="panel0">
+      <div class="card">
+        <div class="card-title"><span class="icon">&#x1F511;</span> 登录上海文化广场</div>
+        <div class="form-grid">
+          <div class="form-group">
+            <label>手机号</label>
+            <input id="phone" type="text" placeholder="请输入手机号">
+          </div>
+          <div class="form-group">
+            <label>密码</label>
+            <input id="password" type="password" placeholder="请输入密码">
+          </div>
+          <div class="form-group full">
+            <button id="btnLogin" class="btn btn-success" onclick="doLogin()" style="width:160px">一键登录</button>
+            <span id="loginStatus" style="font-size:13px;color:var(--text2);margin-top:6px"></span>
+          </div>
+        </div>
       </div>
     </div>
-    <div class="selection-info" id="selectionInfo">当前未选择</div>
-  </div>
 
-  <!-- Tab 2: 监测 -->
-  <div class="panel" id="panel2">
-    <div class="form-row">
-      <label>刷新间隔</label>
-      <input id="interval" type="number" value="3" min="1" max="60" style="width:80px;flex:none"> 秒
-      <label style="width:auto;margin-left:16px">购买数量</label>
-      <input id="qty" type="number" value="1" min="1" max="4" style="width:60px;flex:none">
-    </div>
-    <div class="form-row">
-      <label></label>
-      <button id="btnStart" class="btn btn-success" onclick="startMonitor()">开始监测</button>
-      <button id="btnStop" class="btn btn-danger" onclick="stopMonitor()" disabled>停止监测</button>
-      <span id="monitorSel" style="font-size:13px;color:#999;margin-left:12px"></span>
-    </div>
-    <div class="log-box" id="logBox"></div>
-  </div>
-
-  <!-- Tab 3: 推送 -->
-  <div class="panel" id="panel3">
-    <div class="push-section">
-      <h3>推送方式</h3>
-      <div class="radio-group">
-        <label><input type="radio" name="pushMethod" value="wxpusher" checked> WxPusher（推荐）</label>
-        <label><input type="radio" name="pushMethod" value="serverchan"> Server酱</label>
-        <label><input type="radio" name="pushMethod" value="pushplus"> PushPlus</label>
+    <!-- Tab 1: 选择演出 -->
+    <div class="panel" id="panel1">
+      <div class="card">
+        <div class="card-title"><span class="icon">&#x1F4E6;</span> 加载剧目</div>
+        <button class="btn btn-primary" onclick="loadPrograms()">加载可购票剧目</button>
+      </div>
+      <div class="card">
+        <div class="card-title"><span class="icon">&#x2728;</span> 选择场次和票档</div>
+        <div class="select-trio">
+          <div class="select-col">
+            <label>① 剧目</label>
+            <select id="selProgram" size="10" onchange="onProgramChange()"></select>
+          </div>
+          <div class="select-col">
+            <label>② 场次</label>
+            <select id="selEvent" size="10" onchange="onEventChange()"></select>
+          </div>
+          <div class="select-col">
+            <label>③ 票档</label>
+            <select id="selPrice" size="10" onchange="onPriceChange()"></select>
+          </div>
+        </div>
+        <div class="selection-bar" id="selectionInfo">当前未选择</div>
       </div>
     </div>
-    <div class="push-section">
-      <h3>Token / Key</h3>
-      <input id="pushKey" type="text" placeholder="WxPusher appToken / Server酱 SendKey / PushPlus Token" style="width:100%;padding:8px;border:1px solid #ccc;border-radius:4px">
+
+    <!-- Tab 2: 监测 -->
+    <div class="panel" id="panel2">
+      <div class="card">
+        <div class="card-title"><span class="icon">&#x26A1;</span> 监测设置</div>
+        <div class="monitor-controls">
+          <div class="form-group">
+            <label>刷新间隔（秒）</label>
+            <input id="interval" type="number" value="3" min="1" max="60" style="width:80px">
+          </div>
+          <div class="sep"></div>
+          <div class="form-group">
+            <label>购买数量</label>
+            <input id="qty" type="number" value="1" min="1" max="4" style="width:80px">
+          </div>
+          <div class="sep"></div>
+          <div class="form-group" style="flex-direction:row;align-items:flex-end;gap:10px">
+            <button id="btnStart" class="btn btn-success" onclick="startMonitor()">开始监测</button>
+            <button id="btnStop" class="btn btn-danger" onclick="stopMonitor()" disabled>停止</button>
+          </div>
+        </div>
+        <span id="monitorSel" style="font-size:12px;color:var(--text2)"></span>
+      </div>
+      <div class="card">
+        <div class="card-title"><span class="icon">&#x1F4DC;</span> 实时日志</div>
+        <div class="log-box" id="logBox"></div>
+      </div>
     </div>
-    <div class="push-section">
-      <h3>WxPusher UID</h3>
-      <input id="pushUid" type="text" placeholder="仅 WxPusher 需要" style="width:100%;padding:8px;border:1px solid #ccc;border-radius:4px">
+
+    <!-- Tab 3: 推送 -->
+    <div class="panel" id="panel3">
+      <div class="card">
+        <div class="card-title"><span class="icon">&#x1F4E2;</span> 推送方式</div>
+        <div class="radio-cards">
+          <label class="radio-card active" onclick="selectPush(this,'wxpusher')">
+            <input type="radio" name="pushMethod" value="wxpusher" checked>
+            <div class="rc-icon">&#x1F4AC;</div>
+            <div class="rc-label">WxPusher</div>
+            <div class="rc-desc">推荐，微信推送</div>
+          </label>
+          <label class="radio-card" onclick="selectPush(this,'serverchan')">
+            <input type="radio" name="pushMethod" value="serverchan">
+            <div class="rc-icon">&#x1F514;</div>
+            <div class="rc-label">Server酱</div>
+            <div class="rc-desc">微信服务号</div>
+          </label>
+          <label class="radio-card" onclick="selectPush(this,'pushplus')">
+            <input type="radio" name="pushMethod" value="pushplus">
+            <div class="rc-icon">&#x2795;</div>
+            <div class="rc-label">PushPlus</div>
+            <div class="rc-desc">微信模板消息</div>
+          </label>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title"><span class="icon">&#x1F511;</span> 推送配置</div>
+        <div class="form-grid">
+          <div class="form-group full">
+            <label>Token / Key</label>
+            <input id="pushKey" type="text" placeholder="WxPusher appToken / Server酱 SendKey / PushPlus Token">
+          </div>
+          <div class="form-group full">
+            <label>WxPusher UID <span style="color:var(--text2)">(仅 WxPusher 需要)</span></label>
+            <input id="pushUid" type="text" placeholder="填入你的 UID">
+          </div>
+          <div class="form-group full" style="flex-direction:row;gap:10px">
+            <button class="btn btn-primary" onclick="savePush()">保存配置</button>
+            <button class="btn btn-outline" onclick="testPush()">发送测试</button>
+          </div>
+        </div>
+      </div>
     </div>
-    <div class="form-row">
-      <button class="btn btn-primary" onclick="savePush()">保存配置</button>
-      <button class="btn" onclick="testPush()" style="background:#f39c12;color:#fff">发送测试</button>
-    </div>
+
   </div>
 </div>
 
 <script>
+const pageTitles = ['账号登录','选择演出','余票监测','微信推送'];
+
 // ─── Tab 切换 ───
 function switchTab(i) {
-  document.querySelectorAll('.tab').forEach((t,idx) => t.classList.toggle('active', idx===i));
+  document.querySelectorAll('.nav-item').forEach((t,idx) => t.classList.toggle('active', idx===i));
   document.querySelectorAll('.panel').forEach((p,idx) => p.classList.toggle('active', idx===i));
+  document.getElementById('pageTitle').textContent = pageTitles[i];
+}
+
+// ─── Push radio card ───
+function selectPush(el, val) {
+  document.querySelectorAll('.radio-card').forEach(c => c.classList.remove('active'));
+  el.classList.add('active');
+  el.querySelector('input').checked = true;
 }
 
 // ─── Toast ───
 function toast(msg, ok) {
   let el = document.createElement('div');
   el.className = 'toast ' + (ok ? 'toast-ok' : 'toast-err');
-  el.textContent = msg;
+  el.innerHTML = (ok ? '&#x2705; ' : '&#x274C; ') + msg;
   document.body.appendChild(el);
   setTimeout(() => el.remove(), 3000);
 }
@@ -193,7 +316,15 @@ function connectSSE() {
     try {
       let d = JSON.parse(e.data);
       let line = document.createElement('div');
-      line.textContent = d.msg;
+      line.className = 'log-line';
+      let t = new Date().toLocaleTimeString('zh-CN',{hour12:false});
+      let cls = '';
+      if (d.msg.includes('ERROR') || d.msg.includes('失败') || d.msg.includes('错误')) cls = 'err';
+      else if (d.msg.includes('成功') || d.msg.includes('有票') || d.msg.includes('下单')) cls = 'ok';
+      else if (d.msg.includes('警告') || d.msg.includes('重试')) cls = 'warn';
+      line.innerHTML = cls
+        ? '<span class="ts">[' + t + ']</span> <span class="' + cls + '">' + d.msg + '</span>'
+        : '<span class="ts">[' + t + ']</span> ' + d.msg;
       logBox.appendChild(line);
       if (logBox.children.length > 500) logBox.removeChild(logBox.firstChild);
       logBox.scrollTop = logBox.scrollHeight;
@@ -205,48 +336,43 @@ function connectSSE() {
 }
 connectSSE();
 
-// ─── API 调用 ───
+// ─── API ───
 async function api(url, opts) {
   let resp = await fetch(url, opts);
   return await resp.json();
 }
 
 // ─── 登录 ───
-async function getCaptcha() {
-  let r = await api('/api/captcha', {method:'POST'});
-  if (r.ok) {
-    let img = document.getElementById('captchaImg');
-    let ph = document.getElementById('captchaPlaceholder');
-    img.src = 'data:image/png;base64,' + r.image;
-    img.classList.add('loaded');
-    ph.style.display = 'none';
-    document.getElementById('captcha').value = r.ocr || '';
-    document.getElementById('ocrHint').textContent = r.ocr ? 'OCR: ' + r.ocr : '';
-  } else {
-    toast('获取验证码失败: ' + r.msg, false);
-  }
-}
-
 async function doLogin() {
   let phone = document.getElementById('phone').value.trim();
   let pwd = document.getElementById('password').value.trim();
-  let captcha = document.getElementById('captcha').value.trim();
-  if (!phone || !pwd || !captcha) { toast('请填写完整登录信息', false); return; }
-  document.getElementById('loginStatus').textContent = '登录中...';
-  let r = await api('/api/login', {
-    method: 'POST', headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({phone, password: pwd, captcha})
-  });
-  if (r.ok) {
-    document.getElementById('loginStatus').textContent = '登录成功';
-    document.getElementById('loginStatus').style.color = '#27ae60';
-    toast('登录成功', true);
-  } else {
-    document.getElementById('loginStatus').textContent = '失败: ' + r.msg;
-    document.getElementById('loginStatus').style.color = '#e74c3c';
-    toast('登录失败: ' + r.msg, false);
-    getCaptcha();
+  if (!phone || !pwd) { toast('请填写手机号和密码', false); return; }
+  let btn = document.getElementById('btnLogin');
+  btn.disabled = true;
+  btn.textContent = '登录中...';
+  document.getElementById('loginStatus').textContent = '正在自动识别验证码并登录，请稍候...';
+  document.getElementById('loginStatus').style.color = 'var(--text2)';
+  try {
+    let r = await api('/api/login', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({phone, password: pwd})
+    });
+    if (r.ok) {
+      document.getElementById('loginStatus').textContent = '登录成功';
+      document.getElementById('loginStatus').style.color = 'var(--green)';
+      toast('登录成功', true);
+    } else {
+      document.getElementById('loginStatus').textContent = '失败: ' + r.msg;
+      document.getElementById('loginStatus').style.color = 'var(--red)';
+      toast('登录失败: ' + r.msg, false);
+    }
+  } catch(e) {
+    document.getElementById('loginStatus').textContent = '请求异常';
+    document.getElementById('loginStatus').style.color = 'var(--red)';
+    toast('请求异常: ' + e.message, false);
   }
+  btn.disabled = false;
+  btn.textContent = '一键登录';
 }
 
 // ─── 选择演出 ───
@@ -282,7 +408,7 @@ async function onProgramChange() {
     opt.value = e.event_id;
     let status = e.if_begin === 1 ? '可购' : e.if_begin === 2 ? '已结束' : '未开售';
     let st = e.select_seat === 1 ? '选座' : '无座';
-    opt.textContent = `${e.datetime.slice(0,16)} ${e.week} [${status}] ${st} 余:${e.seat_cnt.toFixed(0)}`;
+    opt.textContent = e.datetime.slice(0,16) + ' ' + e.week + ' [' + status + '] ' + st + ' 余:' + e.seat_cnt.toFixed(0);
     esel.appendChild(opt);
   });
   updateSelectionInfo();
@@ -302,7 +428,7 @@ async function onEventChange() {
     let opt = document.createElement('option');
     opt.value = p.price_id;
     let sold = p.sold_out ? '已售罄' : '有票';
-    opt.textContent = `¥${p.price_amt.toFixed(0)} ${p.desc} ${p.remark} [${sold}]`;
+    opt.textContent = '¥' + p.price_amt.toFixed(0) + ' ' + p.desc + ' ' + p.remark + ' [' + sold + ']';
     psel.appendChild(opt);
   });
   updateSelectionInfo();
@@ -332,9 +458,9 @@ function updateSelectionInfo() {
     for (let e of events) { if (e.event_id === selEventId) { parts.push(e.datetime.slice(0,16)); break; } }
   }
   if (selPriceInfo) parts.push('¥' + selPriceInfo.price_amt.toFixed(0));
-  let text = parts.length ? parts.join(' → ') : '当前未选择';
+  let text = parts.length ? parts.join('  →  ') : '当前未选择';
   document.getElementById('selectionInfo').textContent = text;
-  document.getElementById('monitorSel').textContent = text;
+  document.getElementById('monitorSel').textContent = '当前: ' + text;
 }
 
 // ─── 监测 ───
@@ -363,12 +489,13 @@ function setMonitorState(running) {
   monitoring = running;
   document.getElementById('btnStart').disabled = running;
   document.getElementById('btnStop').disabled = !running;
-  let badge = document.getElementById('statusBadge');
-  badge.textContent = running ? '监测中' : '未运行';
-  badge.className = 'status ' + (running ? 'status-running' : 'status-idle');
+  document.getElementById('statusDot').className = 'status-dot' + (running ? ' on' : '');
+  document.getElementById('statusText').textContent = running ? '监测中' : '未运行';
+  let badge = document.getElementById('topBadge');
+  badge.textContent = running ? 'MONITORING' : 'IDLE';
+  badge.className = 'badge' + (running ? ' live' : '');
 }
 
-// 定时刷新监测状态
 setInterval(async () => {
   try {
     let r = await api('/api/monitor/status');
