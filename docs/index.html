@@ -69,7 +69,10 @@ body{font-family:-apple-system,"Microsoft YaHei","Segoe UI",sans-serif;backgroun
 /* ─── Captcha ─── */
 .captcha-group{display:flex;align-items:center;gap:10px;flex:1}
 .captcha-group input{width:100px;flex:none}
-.captcha-img{height:40px;border-radius:6px;border:1px solid var(--border);cursor:pointer;transition:border .2s}
+.captcha-placeholder{height:40px;width:120px;border-radius:6px;border:1px dashed var(--border);display:flex;align-items:center;justify-content:center;font-size:11px;color:#4a5568;cursor:pointer;transition:all .2s;flex-shrink:0}
+.captcha-placeholder:hover{border-color:var(--accent);color:var(--text2)}
+.captcha-img{height:40px;border-radius:6px;border:1px solid var(--border);cursor:pointer;transition:border .2s;display:none}
+.captcha-img.loaded{display:block}
 .captcha-img:hover{border-color:var(--accent)}
 .ocr-hint{font-size:11px;color:var(--text2)}
 
@@ -184,7 +187,8 @@ body{font-family:-apple-system,"Microsoft YaHei","Segoe UI",sans-serif;backgroun
             <label>验证码</label>
             <div class="captcha-group">
               <input id="captcha" type="text" placeholder="输入验证码">
-              <img id="captchaImg" class="captcha-img" src="" alt="点击获取" onclick="getCaptcha()" title="点击刷新">
+              <div id="captchaPlaceholder" class="captcha-placeholder" onclick="getCaptcha()">点击获取</div>
+              <img id="captchaImg" class="captcha-img" src="" alt="验证码" onclick="getCaptcha()" title="点击刷新">
               <button class="btn btn-outline btn-sm" onclick="getCaptcha()">获取验证码</button>
               <span id="ocrHint" class="ocr-hint"></span>
             </div>
@@ -365,7 +369,11 @@ async function api(url, opts) {
 async function getCaptcha() {
   let r = await api('/api/captcha', {method:'POST'});
   if (r.ok) {
-    document.getElementById('captchaImg').src = 'data:image/png;base64,' + r.image;
+    let img = document.getElementById('captchaImg');
+    let ph = document.getElementById('captchaPlaceholder');
+    img.src = 'data:image/png;base64,' + r.image;
+    img.classList.add('loaded');
+    ph.style.display = 'none';
     document.getElementById('captcha').value = r.ocr || '';
     document.getElementById('ocrHint').textContent = r.ocr ? 'OCR: ' + r.ocr : '';
   } else {

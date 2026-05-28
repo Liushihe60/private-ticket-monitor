@@ -35,7 +35,10 @@ body { font-family: -apple-system, "Microsoft YaHei", sans-serif; background: #f
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .captcha-row { display: flex; align-items: center; gap: 8px; }
-.captcha-img { height: 40px; border: 1px solid #ccc; border-radius: 4px; cursor: pointer; }
+.captcha-placeholder { height: 40px; width: 120px; border: 1px dashed #ccc; border-radius: 4px; display: flex; align-items: center; justify-content: center; font-size: 12px; color: #999; cursor: pointer; transition: all .2s; flex-shrink: 0; }
+.captcha-placeholder:hover { border-color: #3498db; color: #666; }
+.captcha-img { height: 40px; border: 1px solid #ccc; border-radius: 4px; cursor: pointer; display: none; }
+.captcha-img.loaded { display: block; }
 
 select[multiple] { height: 200px; }
 .select-group { display: flex; gap: 12px; }
@@ -89,7 +92,8 @@ select[multiple] { height: 200px; }
       <label>验证码</label>
       <div class="captcha-row">
         <input id="captcha" type="text" placeholder="验证码" style="width:120px;flex:none">
-        <img id="captchaImg" class="captcha-img" src="" alt="点击获取验证码" onclick="getCaptcha()" title="点击刷新">
+        <div id="captchaPlaceholder" class="captcha-placeholder" onclick="getCaptcha()">点击获取</div>
+        <img id="captchaImg" class="captcha-img" src="" alt="验证码" onclick="getCaptcha()" title="点击刷新">
         <button class="btn btn-primary" onclick="getCaptcha()">获取验证码</button>
         <span id="ocrHint" style="font-size:12px;color:#999"></span>
       </div>
@@ -211,7 +215,11 @@ async function api(url, opts) {
 async function getCaptcha() {
   let r = await api('/api/captcha', {method:'POST'});
   if (r.ok) {
-    document.getElementById('captchaImg').src = 'data:image/png;base64,' + r.image;
+    let img = document.getElementById('captchaImg');
+    let ph = document.getElementById('captchaPlaceholder');
+    img.src = 'data:image/png;base64,' + r.image;
+    img.classList.add('loaded');
+    ph.style.display = 'none';
     document.getElementById('captcha').value = r.ocr || '';
     document.getElementById('ocrHint').textContent = r.ocr ? 'OCR: ' + r.ocr : '';
   } else {
