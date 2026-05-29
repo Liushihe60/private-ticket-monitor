@@ -25,6 +25,7 @@ from PIL import Image
 from playwright.sync_api import sync_playwright
 import ddddocr
 from flask import Flask, render_template, request, jsonify, Response, session, redirect, url_for
+from werkzeug.security import generate_password_hash, check_password_hash
 
 # ─── 常量 ─────────────────────────────────────────────────────────────────────
 
@@ -590,11 +591,39 @@ class WeChatNotifier:
             return False, str(e)
 
 
-# ─── 访问密码 ──────────────────────────────────────────────────────────────────
+# ─── 站点配置（支持运行时修改）────────────────────────────────────────────────
 
-ACCESS_PASSWORD = os.environ.get("TICKET_PASSWORD", "changeme")
-DEV_USERNAME = os.environ.get("DEV_USERNAME", "admin")
-DEV_PASSWORD = os.environ.get("DEV_PASSWORD", "admin123")
+SITE_SETTINGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs", "_site.json")
+
+_site_settings = {
+    "access_password": os.environ.get("TICKET_PASSWORD", "changeme"),
+    "dev_username": os.environ.get("DEV_USERNAME", "admin"),
+    "dev_password": os.environ.get("DEV_PASSWORD", "admin123"),
+}
+
+
+def _load_site_settings():
+    global _site_settings
+    if os.path.exists(SITE_SETTINGS_PATH):
+        try:
+            with open(SITE_SETTINGS_PATH, "r", encoding="utf-8") as f:
+                saved = json.load(f)
+            _site_settings.update(saved)
+        except Exception:
+            pass
+
+
+def _save_site_settings():
+    os.makedirs(os.path.dirname(SITE_SETTINGS_PATH), exist_ok=True)
+    with open(SITE_SETTINGS_PATH, "w", encoding="utf-8") as f:
+        json.dump(_site_settings, f, ensure_ascii=False, indent=2)
+
+
+def _get(key: str) -> str:
+    return _site_settings.get(key, "")
+
+
+_load_site_settings()
 
 # ─── Flask 应用 ────────────────────────────────────────────────────────────────
 
@@ -652,12 +681,13 @@ def _save_registry(registry: dict):
         json.dump(registry, f, ensure_ascii=False, indent=2)
 
 
-def _register_user(username: str) -> bool:
+def _register_user(username: str, password: str) -> bool:
     """注册新用户，返回 True 表示成功，False 表示已存在"""
     registry = _load_registry()
     if username in registry:
         return False
     registry[username] = {
+        "password_hash": generate_password_hash(password),
         "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "last_login": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "login_count": 1,
@@ -665,6 +695,15 @@ def _register_user(username: str) -> bool:
     _save_registry(registry)
     _save_user_config(username, UserSession(username=username))
     return True
+
+
+def _verify_user(username: str, password: str) -> bool:
+    """验证用户名和密码"""
+    registry = _load_registry()
+    user = registry.get(username)
+    if not user:
+        return False
+    return check_password_hash(user.get("password_hash", ""), password)
 
 
 def _update_registry_login(username: str):
@@ -871,17 +910,17 @@ def auth_login():
     if not d:
         return jsonify({"ok": False, "msg": "请求格式错误"})
     username = d.get("username", "").strip()
+    password = d.get("password", "")
     if not username:
         return jsonify({"ok": False, "msg": "请输入用户名"})
+    if not password:
+        return jsonify({"ok": False, "msg": "请输入密码"})
     if len(username) > 32:
         return jsonify({"ok": False, "msg": "用户名最长32个字符"})
     if not re.match(r'^[a-zA-Z0-9_一-鿿]+$', username):
         return jsonify({"ok": False, "msg": "用户名只能包含字母、数字、下划线和中文"})
-    if d.get("password") != ACCESS_PASSWORD:
-        return jsonify({"ok": False, "msg": "密码错误"})
-    registry = _load_registry()
-    if username not in registry:
-        return jsonify({"ok": False, "msg": "用户未注册，请先注册"})
+    if not _verify_user(username, password):
+        return jsonify({"ok": False, "msg": "用户名或密码错误"})
     _update_registry_login(username)
     session["authenticated"] = True
     session["username"] = username
@@ -896,15 +935,18 @@ def auth_register():
     if not d:
         return jsonify({"ok": False, "msg": "请求格式错误"})
     username = d.get("username", "").strip()
+    password = d.get("password", "")
     if not username:
         return jsonify({"ok": False, "msg": "请输入用户名"})
+    if not password:
+        return jsonify({"ok": False, "msg": "请设置密码"})
+    if len(password) < 4:
+        return jsonify({"ok": False, "msg": "密码至少4个字符"})
     if len(username) > 32:
         return jsonify({"ok": False, "msg": "用户名最长32个字符"})
     if not re.match(r'^[a-zA-Z0-9_一-鿿]+$', username):
         return jsonify({"ok": False, "msg": "用户名只能包含字母、数字、下划线和中文"})
-    if d.get("password") != ACCESS_PASSWORD:
-        return jsonify({"ok": False, "msg": "密码错误"})
-    if not _register_user(username):
+    if not _register_user(username, password):
         return jsonify({"ok": False, "msg": "用户名已存在，请直接登录"})
     session["authenticated"] = True
     session["username"] = username
@@ -942,7 +984,7 @@ def admin_login():
     d = request.json
     if not d:
         return jsonify({"ok": False, "msg": "请求格式错误"})
-    if d.get("username") != DEV_USERNAME or d.get("password") != DEV_PASSWORD:
+    if d.get("username") != _get("dev_username") or d.get("password") != _get("dev_password"):
         return jsonify({"ok": False, "msg": "开发者账号或密码错误"})
     session["is_admin"] = True
     session.permanent = True
@@ -994,6 +1036,36 @@ def admin_stop():
         return jsonify({"ok": False, "msg": "用户不在线"})
     us.monitoring = False
     return jsonify({"ok": True, "msg": f"已停止 {username} 的监测"})
+
+
+@app.route("/api/admin/settings")
+def admin_settings():
+    return jsonify({"ok": True, "data": {
+        "access_password": _get("access_password"),
+        "dev_username": _get("dev_username"),
+        "dev_password": "***",
+    }})
+
+
+@app.route("/api/admin/settings/update", methods=["POST"])
+def admin_settings_update():
+    d = request.json
+    if not d:
+        return jsonify({"ok": False, "msg": "请求格式错误"})
+    changed = []
+    if "access_password" in d and d["access_password"]:
+        _site_settings["access_password"] = d["access_password"]
+        changed.append("访问密码")
+    if "dev_username" in d and d["dev_username"]:
+        _site_settings["dev_username"] = d["dev_username"]
+        changed.append("开发者账号")
+    if "dev_password" in d and d["dev_password"]:
+        _site_settings["dev_password"] = d["dev_password"]
+        changed.append("开发者密码")
+    if changed:
+        _save_site_settings()
+        return jsonify({"ok": True, "msg": f"已更新: {', '.join(changed)}"})
+    return jsonify({"ok": False, "msg": "未填写任何更改"})
 
 
 # ─── 业务路由 ─────────────────────────────────────────────────────────────────
@@ -1321,5 +1393,5 @@ def _monitor_loop(us: UserSession, event_id, price_id, qty, interval, event_if_b
 # ─── 启动 ──────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Web 服务启动，访问密码: {ACCESS_PASSWORD}")
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Web 服务启动，访问密码: {_get('access_password')}")
     app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)

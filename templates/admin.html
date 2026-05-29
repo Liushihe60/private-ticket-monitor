@@ -46,6 +46,12 @@ tr:hover td{background:rgba(108,99,255,.04)}
 .toast-err{background:rgba(239,68,68,.15);color:var(--red);border:1px solid rgba(239,68,68,.3)}
 @keyframes slideIn{from{opacity:0;transform:translateX(20px)}to{opacity:1;transform:translateX(0)}}
 .actions-cell{display:flex;gap:6px}
+.settings-row{display:flex;align-items:center;gap:12px;margin-bottom:12px}
+.settings-row label{width:120px;font-size:13px;color:var(--text2);flex-shrink:0}
+.settings-row input{flex:1;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:8px 12px;color:var(--text);font-size:13px;outline:none;max-width:300px}
+.settings-row input:focus{border-color:var(--accent)}
+.btn-primary-custom{background:var(--accent);color:#fff;border:none;padding:6px 16px;border-radius:6px;font-size:12px;font-weight:500;cursor:pointer}
+.btn-primary-custom:hover{background:#5b54e8}
 </style>
 </head>
 <body>
@@ -69,6 +75,24 @@ tr:hover td{background:rgba(108,99,255,.04)}
 <div class="card">
   <div class="card-title">实时监测活动</div>
   <div id="sessionsTable"></div>
+</div>
+
+<div class="card">
+  <div class="card-title">站点设置</div>
+  <div id="settingsArea">
+    <div class="settings-row">
+      <label>开发者账号</label>
+      <input type="text" id="setDevUser" placeholder="留空则不修改">
+    </div>
+    <div class="settings-row">
+      <label>开发者密码</label>
+      <input type="text" id="setDevPw" placeholder="留空则不修改">
+    </div>
+    <div style="margin-top:12px">
+      <button class="btn-sm btn-primary-custom" onclick="saveSettings()">保存设置</button>
+      <span id="settingsHint" style="font-size:12px;color:var(--text2);margin-left:12px"></span>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -146,6 +170,34 @@ async function loadData() {
   renderUsers(users);
   renderSessions(sessions);
   document.getElementById('refreshTime').textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN', {hour12: false});
+  loadSettings();
+}
+
+async function loadSettings() {
+  var r = await api('/api/admin/settings');
+  if (!r.ok) return;
+  document.getElementById('setDevUser').placeholder = '当前: ' + r.data.dev_username;
+  document.getElementById('setDevPw').placeholder = '当前: 已设置';
+}
+
+async function saveSettings() {
+  var body = {};
+  var du = document.getElementById('setDevUser').value.trim();
+  var dp = document.getElementById('setDevPw').value.trim();
+  if (du) body.dev_username = du;
+  if (dp) body.dev_password = dp;
+  if (!Object.keys(body).length) { toast('未填写任何更改', false); return; }
+  var r = await api('/api/admin/settings/update', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body)
+  });
+  toast(r.msg || (r.ok ? '保存成功' : '保存失败'), r.ok);
+  if (r.ok) {
+    document.getElementById('setDevUser').value = '';
+    document.getElementById('setDevPw').value = '';
+    loadSettings();
+  }
 }
 
 async function kickUser(username) {

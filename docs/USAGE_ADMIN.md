@@ -62,7 +62,20 @@
 
 可以点击 **停止监测** 按钮远程停止任意用户的监测。
 
-### 2.4 自动刷新
+### 2.4 站点设置
+
+管理后台底部的 **站点设置** 区域可以修改系统配置，**无需重启服务器**：
+
+| 设置项 | 说明 |
+|--------|------|
+| 开发者账号 | 管理后台登录的用户名 |
+| 开发者密码 | 管理后台登录的密码 |
+
+- 留空表示不修改该项
+- 修改后立即生效
+- 配置保存在 `configs/_site.json`，服务器重启后依然有效
+
+### 2.5 自动刷新
 
 管理后台每 10 秒自动刷新数据。也可以点击右上角 **刷新** 按钮手动刷新。
 
@@ -70,14 +83,17 @@
 
 ## 3. 服务器配置
 
-### 3.1 环境变量
+### 3.1 环境变量（可选）
+
+> 这些配置也可以在管理后台的 **站点设置** 中修改，无需设置环境变量。
 
 | 变量名 | 默认值 | 说明 |
 |--------|--------|------|
-| `TICKET_PASSWORD` | `changeme` | 用户注册/登录的访问密码 |
 | `DEV_USERNAME` | `admin` | 开发者后台登录账号 |
 | `DEV_PASSWORD` | `admin123` | 开发者后台登录密码 |
 | `FLASK_SECRET` | 随机生成 | Flask session 加密密钥 |
+
+如果通过管理后台修改了配置，会保存在 `configs/_site.json`，优先级高于环境变量。
 
 ### 3.2 启动命令
 
@@ -85,7 +101,6 @@
 cd ~/ticket
 source ~/ticket-venv/bin/activate
 
-export TICKET_PASSWORD=你的用户密码
 export DEV_USERNAME=admin
 export DEV_PASSWORD=你的管理员密码
 
@@ -111,7 +126,6 @@ After=network.target
 Type=simple
 User=ubuntu
 WorkingDirectory=/home/ubuntu/ticket
-Environment=TICKET_PASSWORD=你的用户密码
 Environment=DEV_USERNAME=admin
 Environment=DEV_PASSWORD=你的管理员密码
 ExecStart=/home/ubuntu/ticket-venv/bin/python ticket_web.py
@@ -182,7 +196,7 @@ configs/
 
 ## 5. 安全建议
 
-1. **修改默认密码**：部署时务必修改 `TICKET_PASSWORD`、`DEV_PASSWORD` 的默认值
+1. **修改默认密码**：部署时务必修改 `DEV_PASSWORD` 的默认值
 2. **使用 HTTPS**：通过 Nginx 反向代理 + Let's Encrypt 证书启用 HTTPS
 3. **限制访问**：如果不需要公开使用，可以通过 Nginx 限制 IP 访问
 4. **定期检查**：通过管理后台定期查看用户注册情况，清理异常账号
