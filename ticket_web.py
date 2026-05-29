@@ -66,53 +66,47 @@ class BrowserManager:
         self._slots = []
 
     def _pick_slot(self) -> dict:
-        """轮询选择一个可用的浏览器槽位，自动恢复崩溃的浏览器"""
+        """轮询选择一个可用的浏览器槽位，自动恢复崩溃的浏览器（调用方需持有返回的锁）"""
         with self._counter_lock:
             idx = self._counter % len(self._slots)
             self._counter += 1
         slot = self._slots[idx]
-        with slot["lock"]:
-            try:
-                if slot["browser"] is not None:
-                    slot["browser"].contexts
-            except Exception:
-                slot["browser"] = None
-            if slot["browser"] is None:
-                from playwright.sync_api import sync_playwright
-                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 正在启动浏览器实例...")
-                slot["pw"] = sync_playwright().start()
-                slot["browser"] = slot["pw"].chromium.launch(headless=True)
+        slot["lock"].acquire()
+        try:
+            if slot["browser"] is not None:
+                slot["browser"].contexts
+        except Exception:
+            slot["browser"] = None
+        if slot["browser"] is None:
+            from playwright.sync_api import sync_playwright
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 正在启动浏览器实例...")
+            slot["pw"] = sync_playwright().start()
+            slot["browser"] = slot["pw"].chromium.launch(headless=True)
         return slot
-
-    def _new_page(self):
-        slot = self._pick_slot()
-        with slot["lock"]:
-            return slot["browser"].new_page()
-
-    def _new_context(self):
-        slot = self._pick_slot()
-        with slot["lock"]:
-            return slot["browser"].new_context()
 
     def fetch_captcha(self) -> tuple[bytes, dict]:
         """返回 (png_bytes, cookies_dict) — 复用浏览器池，失败自动重试一次"""
         for attempt in range(2):
-            page = self._new_page()
+            slot = self._pick_slot()
             try:
-                page.goto(f"{BASE_URL}/PersonalCenter/loginwechat.aspx",
-                          wait_until="networkidle", timeout=15000)
-                captcha_el = page.locator("#yanzhengma")
-                if captcha_el.count() == 0:
-                    raise RuntimeError("页面中未找到验证码元素 #yanzhengma")
-                img_bytes = captcha_el.screenshot()
-                cookies = {c["name"]: c["value"] for c in page.context.cookies()}
-                return img_bytes, cookies
+                page = slot["browser"].new_page()
+                try:
+                    page.goto(f"{BASE_URL}/PersonalCenter/loginwechat.aspx",
+                              wait_until="networkidle", timeout=15000)
+                    captcha_el = page.locator("#yanzhengma")
+                    if captcha_el.count() == 0:
+                        raise RuntimeError("页面中未找到验证码元素 #yanzhengma")
+                    img_bytes = captcha_el.screenshot()
+                    cookies = {c["name"]: c["value"] for c in page.context.cookies()}
+                    return img_bytes, cookies
+                finally:
+                    page.close()
             except Exception:
                 if attempt == 0:
                     continue
                 raise
             finally:
-                page.close()
+                slot["lock"].release()
 
     def select_seat_and_buy(self, program_id, event_id, price_id,
                             cookies, token, qty=1, log_callback=None):
@@ -121,9 +115,10 @@ class BrowserManager:
                 if log_callback:
                     log_callback(msg)
 
-            context = self._new_context()
-            page = context.new_page()
+            slot = self._pick_slot()
             try:
+                context = slot["browser"].new_context()
+                page = context.new_page()
                 cookie_list = []
                 for name, value in cookies.items():
                     for domain in ("m.shcstheatre.com", "seatmb2.shcstheatre.com"):
@@ -452,6 +447,7 @@ class BrowserManager:
             finally:
                 page.close()
                 context.close()
+                slot["lock"].release()
 
         return _do_select()
 
