@@ -22,8 +22,6 @@ from datetime import datetime, timedelta
 import requests
 from bs4 import BeautifulSoup
 from PIL import Image
-from playwright.sync_api import sync_playwright
-import ddddocr
 from flask import Flask, render_template, request, jsonify, Response, session, redirect, url_for
 from werkzeug.security import generate_password_hash, check_password_hash
 
@@ -45,6 +43,7 @@ class BrowserManager:
         self._browser = None
 
     def start(self):
+        from playwright.sync_api import sync_playwright
         self._pw = sync_playwright().start()
         self._browser = self._pw.chromium.launch(headless=True)
 
@@ -56,6 +55,7 @@ class BrowserManager:
 
     def fetch_captcha(self) -> tuple[bytes, dict]:
         """返回 (png_bytes, cookies_dict)"""
+        from playwright.sync_api import sync_playwright
         with sync_playwright() as pw:
             browser = pw.chromium.launch(headless=True)
             page = browser.new_page()
@@ -75,6 +75,7 @@ class BrowserManager:
     @staticmethod
     def login_with_captcha(username: str, password: str, ocr_engine) -> tuple[bool, str, dict]:
         """一键登录：Playwright 获取验证码 + OCR + HTTP 登录，返回 (成功, 消息, cookies)"""
+        from playwright.sync_api import sync_playwright
         with sync_playwright() as pw:
             browser = pw.chromium.launch(headless=True)
             page = browser.new_page()
@@ -114,6 +115,7 @@ class BrowserManager:
                 if log_callback:
                     log_callback(msg)
 
+            from playwright.sync_api import sync_playwright
             with sync_playwright() as pw:
                 browser = pw.chromium.launch(headless=True)
                 context = browser.new_context()
@@ -809,6 +811,7 @@ _ocr_engine = None
 def get_ocr():
     global _ocr_engine
     if _ocr_engine is None:
+        import ddddocr
         _ocr_engine = ddddocr.DdddOcr(show_ad=False)
     return _ocr_engine
 
