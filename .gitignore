@@ -29,3 +29,6 @@ Desktop.ini
 
 # Claude 配置
 .claude/
+
+# 用户配置（含推送密钥）
+configs/

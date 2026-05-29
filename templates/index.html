@@ -154,6 +154,8 @@ body{font-family:-apple-system,"Microsoft YaHei","Segoe UI",sans-serif;backgroun
   <div class="sidebar-footer">
     <div class="status-dot" id="statusDot"></div>
     <span class="status-text" id="statusText">未运行</span>
+    <span style="margin-left:auto;font-size:12px;color:var(--text2)">{{ username }}</span>
+    <span style="cursor:pointer;font-size:12px;color:var(--text2)" onclick="logout()" title="退出登录">&#x23FB;</span>
   </div>
 </div>
 
@@ -356,8 +358,17 @@ connectSSE();
 
 // ─── API ───
 async function api(url, opts) {
+  opts = opts || {};
+  opts.credentials = 'include';
   let resp = await fetch(url, opts);
+  if (resp.status === 401) { window.location.href = '/'; return {ok: false, msg: '未登录'}; }
   return await resp.json();
+}
+
+// ─── 登出 ───
+async function logout() {
+  await fetch('/api/auth/logout', {method:'POST', credentials:'include'});
+  window.location.href = '/';
 }
 
 // ─── 登录 ───

@@ -9,18 +9,22 @@ import re
 import io
 import json
 import time
+import os
+import uuid
+import secrets
 import base64
 import queue
 import threading
 import collections
-from datetime import datetime
+import functools
+from datetime import datetime, timedelta
 
 import requests
 from bs4 import BeautifulSoup
 from PIL import Image
 from playwright.sync_api import sync_playwright
 import ddddocr
-from flask import Flask, render_template, request, jsonify, Response
+from flask import Flask, render_template, request, jsonify, Response, session, redirect, url_for
 
 # ─── 常量 ─────────────────────────────────────────────────────────────────────
 
@@ -31,43 +35,6 @@ HEADERS = {
                   "Chrome/120.0.0.0 Safari/537.36",
     "Referer": f"{BASE_URL}/Program/ProgramListWeChat.aspx?GROUP_ID=351",
 }
-
-# ─── 日志系统（SSE 广播 + 文件按需刷写）────────────────────────────────────────
-
-_log_buf = collections.deque(maxlen=200)
-_log_file = "ticket_monitor.log"
-_log_subscribers: list[queue.Queue] = []
-_sub_lock = threading.Lock()
-
-
-def _broadcast(msg: str):
-    """向所有 SSE 订阅者广播日志"""
-    with _sub_lock:
-        dead = []
-        for q in _log_subscribers:
-            try:
-                q.put_nowait(msg)
-            except queue.Full:
-                dead.append(q)
-        for q in dead:
-            _log_subscribers.remove(q)
-
-
-def log(msg: str, flush: bool = False):
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    line = f"[{ts}] {msg}"
-    _log_buf.append(line)
-    _broadcast(line)
-    if flush:
-        _flush_log(msg)
-
-
-def _flush_log(reason: str):
-    with open(_log_file, "a", encoding="utf-8") as f:
-        f.write(f"\n{'='*60}\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {reason}\n{'='*60}\n")
-        while _log_buf:
-            f.write(_log_buf.popleft() + "\n")
-
 
 # ─── 浏览器层 ──────────────────────────────────────────────────────────────────
 
@@ -119,7 +86,6 @@ class BrowserManager:
                 img_bytes = captcha_el.screenshot()
                 cookies = {c["name"]: c["value"] for c in page.context.cookies()}
                 captcha_text = ocr_engine.classification(img_bytes)
-                log(f"验证码 OCR 识别: {captcha_text}")
             finally:
                 page.close()
                 browser.close()
@@ -552,11 +518,7 @@ class SHCSTheatreAPI:
     def get_price_levels(self, event_id: int) -> list[dict]:
         url = f"{BASE_URL}/webapi.ashx?op=GettblpricelevelList_ns"
         resp = self.session.post(url, data={"I_EVENT_ID": event_id})
-        _log_buf.append(f"[API] get_price_levels HTTP {resp.status_code} len={len(resp.text)}")
         result = resp.json()
-        if result.get("code") != 0:
-            _log_buf.append(f"[API] get_price_levels 异常: {json.dumps(result, ensure_ascii=False)[:300]}")
-            _flush_log("get_price_levels 异常响应")
         prices = []
         if result.get("code") == 0 and result.get("data"):
             for p in result["data"]:
@@ -577,9 +539,7 @@ class SHCSTheatreAPI:
         url = f"{BASE_URL}/SK_WebAPI.ashx?op=NoSeatBuy"
         data = {"I_EVENT_ID": event_id, "I_PRICE_ID": price_id, "iQty": qty, "token": self.token}
         resp = self.session.post(url, data=data)
-        _log_buf.append(f"[API] buy_ticket HTTP {resp.status_code} event={event_id} price={price_id}")
         result = resp.json()
-        _log_buf.append(f"[API] buy_ticket 响应: {json.dumps(result, ensure_ascii=False)[:500]}")
         return result
 
 
@@ -630,148 +590,521 @@ class WeChatNotifier:
             return False, str(e)
 
 
+# ─── 访问密码 ──────────────────────────────────────────────────────────────────
+
+ACCESS_PASSWORD = os.environ.get("TICKET_PASSWORD", "changeme")
+DEV_USERNAME = os.environ.get("DEV_USERNAME", "admin")
+DEV_PASSWORD = os.environ.get("DEV_PASSWORD", "admin123")
+
 # ─── Flask 应用 ────────────────────────────────────────────────────────────────
 
 app = Flask(__name__)
+app.secret_key = os.environ.get("FLASK_SECRET", secrets.token_hex(32))
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(hours=4)
 
-# CORS 支持（允许 GitHub Pages 前端跨域调用）
+
+# ─── 用户会话管理 ─────────────────────────────────────────────────────────────
+
+CONFIG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs")
+
+
+def _load_user_config(username: str) -> dict:
+    path = os.path.join(CONFIG_DIR, f"{username}.json")
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def _save_user_config(username: str, us: "UserSession"):
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    path = os.path.join(CONFIG_DIR, f"{username}.json")
+    data = {
+        "push_method": us.push_method,
+        "push_key": us.push_key,
+        "push_uid": us.push_uid,
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+REGISTRY_PATH = os.path.join(CONFIG_DIR, "_registry.json")
+
+
+def _load_registry() -> dict:
+    if os.path.exists(REGISTRY_PATH):
+        try:
+            with open(REGISTRY_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def _save_registry(registry: dict):
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    with open(REGISTRY_PATH, "w", encoding="utf-8") as f:
+        json.dump(registry, f, ensure_ascii=False, indent=2)
+
+
+def _register_user(username: str) -> bool:
+    """注册新用户，返回 True 表示成功，False 表示已存在"""
+    registry = _load_registry()
+    if username in registry:
+        return False
+    registry[username] = {
+        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "last_login": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "login_count": 1,
+    }
+    _save_registry(registry)
+    _save_user_config(username, UserSession(username=username))
+    return True
+
+
+def _update_registry_login(username: str):
+    """更新用户登录记录"""
+    registry = _load_registry()
+    if username in registry:
+        registry[username]["last_login"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        registry[username]["login_count"] = registry[username].get("login_count", 0) + 1
+        _save_registry(registry)
+
+
+class UserSession:
+    """每个登录用户独立的状态"""
+    def __init__(self, username: str = ""):
+        self.username = username
+        self.api = SHCSTheatreAPI()
+        self.captcha_cookies = {}
+        self.monitoring = False
+        self.monitor_thread = None
+        self.programs = []
+        self.events = []
+        self.prices = []
+        self.sel_program_id = None
+        self.sel_program_name = ""
+        self.sel_event_id = None
+        self.sel_event_dt = ""
+        self.sel_price_id = None
+        self.sel_price_info = None
+        self.push_method = "wxpusher"
+        self.push_key = ""
+        self.push_uid = ""
+        self.created_at = time.time()
+        self.last_active = time.time()
+        self.log_buf = collections.deque(maxlen=200)
+        self.log_subscribers: list[queue.Queue] = []
+        self._log_lock = threading.Lock()
+
+
+class UserManager:
+    """管理所有用户会话，线程安全"""
+    def __init__(self, ttl_seconds=3600):
+        self._sessions: dict[str, UserSession] = {}
+        self._lock = threading.Lock()
+        self._ttl = ttl_seconds
+
+    def get_or_create(self, username: str) -> UserSession:
+        with self._lock:
+            if username in self._sessions:
+                self._sessions[username].last_active = time.time()
+                return self._sessions[username]
+            sess = UserSession(username=username)
+            cfg = _load_user_config(username)
+            if cfg:
+                sess.push_method = cfg.get("push_method", "wxpusher")
+                sess.push_key = cfg.get("push_key", "")
+                sess.push_uid = cfg.get("push_uid", "")
+            self._sessions[username] = sess
+            return sess
+
+    def get(self, user_id: str):
+        with self._lock:
+            sess = self._sessions.get(user_id)
+            if sess:
+                sess.last_active = time.time()
+            return sess
+
+    def remove(self, user_id: str):
+        with self._lock:
+            sess = self._sessions.pop(user_id, None)
+            if sess and sess.monitoring:
+                sess.monitoring = False
+
+    def cleanup_stale(self):
+        now = time.time()
+        with self._lock:
+            expired = [uid for uid, s in self._sessions.items()
+                       if now - s.last_active > self._ttl]
+            for uid in expired:
+                sess = self._sessions.pop(uid)
+                if sess.monitoring:
+                    sess.monitoring = False
+
+    def get_all_sessions(self) -> list[dict]:
+        with self._lock:
+            result = []
+            for username, sess in self._sessions.items():
+                info = {
+                    "username": username,
+                    "online": True,
+                    "monitoring": sess.monitoring,
+                    "sel_program_name": sess.sel_program_name,
+                    "sel_event_dt": sess.sel_event_dt,
+                    "sel_price_info": sess.sel_price_info,
+                    "last_active": datetime.fromtimestamp(sess.last_active).strftime("%Y-%m-%d %H:%M:%S"),
+                }
+                result.append(info)
+            return result
+
+
+# ─── 共享单例 ─────────────────────────────────────────────────────────────────
+
+ocr_engine = ddddocr.DdddOcr(show_ad=False)
+browser_manager = BrowserManager()
+user_manager = UserManager(ttl_seconds=3600)
+
+
+def _cleanup_loop():
+    while True:
+        time.sleep(300)
+        user_manager.cleanup_stale()
+
+threading.Thread(target=_cleanup_loop, daemon=True).start()
+
+
+# ─── 日志系统（SSE 广播 + 文件按需刷写）────────────────────────────────────────
+
+_log_file = "ticket_monitor.log"
+
+
+def _flush_log(reason: str):
+    with open(_log_file, "a", encoding="utf-8") as f:
+        f.write(f"\n{'='*60}\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {reason}\n{'='*60}\n")
+
+
+def user_log(us: UserSession, msg: str, flush: bool = False):
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    line = f"[{ts}] {msg}"
+    us.log_buf.append(line)
+    with us._log_lock:
+        dead = []
+        for q in us.log_subscribers:
+            try:
+                q.put_nowait(line)
+            except queue.Full:
+                dead.append(q)
+        for q in dead:
+            us.log_subscribers.remove(q)
+    if flush:
+        _flush_log(msg)
+
+
+def get_user_session() -> UserSession:
+    username = session.get("username", "")
+    return user_manager.get_or_create(username)
+
+
+# ─── CORS ─────────────────────────────────────────────────────────────────────
+
+ALLOWED_ORIGINS = {"http://49.235.110.106:5000", "https://ticket-60.site",
+                   "http://ticket-60.site", "https://liushihe60.github.io"}
+
+
 @app.after_request
 def add_cors_headers(response):
-    response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
-    response.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
+    origin = request.headers.get("Origin")
+    if origin in ALLOWED_ORIGINS:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        response.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
+        response.headers["Access-Control-Allow-Credentials"] = "true"
     return response
 
-# 全局状态
-_state = {
-    "browser": BrowserManager(),
-    "api": SHCSTheatreAPI(),
-    "ocr": ddddocr.DdddOcr(show_ad=False),
-    "captcha_cookies": {},
-    "monitoring": False,
-    "monitor_thread": None,
-    "programs": [],
-    "events": [],
-    "prices": [],
-    # 用户选择
-    "sel_program_id": None,
-    "sel_program_name": "",
-    "sel_event_id": None,
-    "sel_event_dt": "",
-    "sel_price_id": None,
-    "sel_price_info": None,
-    # 推送配置
-    "push_method": "wxpusher",
-    "push_key": "",
-    "push_uid": "",
-}
 
+# ─── 认证中间件 ───────────────────────────────────────────────────────────────
+
+PUBLIC_ROUTES = {"/", "/admin", "/api/auth/login", "/api/auth/register",
+                 "/api/auth/check", "/api/admin/login"}
+
+
+@app.before_request
+def check_auth():
+    if request.path in PUBLIC_ROUTES or request.path.startswith("/static"):
+        return None
+    # 管理员路由需要管理员登录
+    if request.path.startswith("/api/admin/") or request.path == "/admin":
+        if not session.get("is_admin"):
+            return jsonify({"ok": False, "msg": "未登录", "code": 401}), 401
+        return None
+    # 普通路由需要用户登录
+    if not session.get("authenticated"):
+        return jsonify({"ok": False, "msg": "未登录", "code": 401}), 401
+    return None
+
+
+# ─── 认证路由 ─────────────────────────────────────────────────────────────────
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    if session.get("authenticated"):
+        return redirect("/app")
+    return render_template("login.html")
 
+
+@app.route("/app")
+def app_page():
+    if not session.get("authenticated"):
+        return redirect("/")
+    return render_template("index.html", username=session.get("username", ""))
+
+
+@app.route("/api/auth/login", methods=["POST"])
+def auth_login():
+    d = request.json
+    if not d:
+        return jsonify({"ok": False, "msg": "请求格式错误"})
+    username = d.get("username", "").strip()
+    if not username:
+        return jsonify({"ok": False, "msg": "请输入用户名"})
+    if len(username) > 32:
+        return jsonify({"ok": False, "msg": "用户名最长32个字符"})
+    if not re.match(r'^[a-zA-Z0-9_一-鿿]+$', username):
+        return jsonify({"ok": False, "msg": "用户名只能包含字母、数字、下划线和中文"})
+    if d.get("password") != ACCESS_PASSWORD:
+        return jsonify({"ok": False, "msg": "密码错误"})
+    registry = _load_registry()
+    if username not in registry:
+        return jsonify({"ok": False, "msg": "用户未注册，请先注册"})
+    _update_registry_login(username)
+    session["authenticated"] = True
+    session["username"] = username
+    session.permanent = True
+    user_manager.get_or_create(username)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/auth/register", methods=["POST"])
+def auth_register():
+    d = request.json
+    if not d:
+        return jsonify({"ok": False, "msg": "请求格式错误"})
+    username = d.get("username", "").strip()
+    if not username:
+        return jsonify({"ok": False, "msg": "请输入用户名"})
+    if len(username) > 32:
+        return jsonify({"ok": False, "msg": "用户名最长32个字符"})
+    if not re.match(r'^[a-zA-Z0-9_一-鿿]+$', username):
+        return jsonify({"ok": False, "msg": "用户名只能包含字母、数字、下划线和中文"})
+    if d.get("password") != ACCESS_PASSWORD:
+        return jsonify({"ok": False, "msg": "密码错误"})
+    if not _register_user(username):
+        return jsonify({"ok": False, "msg": "用户名已存在，请直接登录"})
+    session["authenticated"] = True
+    session["username"] = username
+    session.permanent = True
+    user_manager.get_or_create(username)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/auth/check")
+def auth_check():
+    return jsonify({"authenticated": session.get("authenticated", False),
+                    "username": session.get("username", "")})
+
+
+@app.route("/api/auth/logout", methods=["POST"])
+def auth_logout():
+    username = session.get("username", "")
+    if username:
+        user_manager.remove(username)
+    session.clear()
+    return jsonify({"ok": True})
+
+
+# ─── 管理员路由 ───────────────────────────────────────────────────────────────
+
+@app.route("/admin")
+def admin_page():
+    if not session.get("is_admin"):
+        return render_template("login.html", is_admin=True)
+    return render_template("admin.html")
+
+
+@app.route("/api/admin/login", methods=["POST"])
+def admin_login():
+    d = request.json
+    if not d:
+        return jsonify({"ok": False, "msg": "请求格式错误"})
+    if d.get("username") != DEV_USERNAME or d.get("password") != DEV_PASSWORD:
+        return jsonify({"ok": False, "msg": "开发者账号或密码错误"})
+    session["is_admin"] = True
+    session.permanent = True
+    return jsonify({"ok": True})
+
+
+@app.route("/api/admin/users")
+def admin_users():
+    registry = _load_registry()
+    active_sessions = user_manager.get_all_sessions()
+    active_usernames = {s["username"] for s in active_sessions}
+    users = []
+    for username, meta in registry.items():
+        users.append({
+            "username": username,
+            "created_at": meta.get("created_at", ""),
+            "last_login": meta.get("last_login", ""),
+            "login_count": meta.get("login_count", 0),
+            "online": username in active_usernames,
+        })
+    users.sort(key=lambda u: u["last_login"], reverse=True)
+    return jsonify({"ok": True, "data": users})
+
+
+@app.route("/api/admin/sessions")
+def admin_sessions():
+    sessions = user_manager.get_all_sessions()
+    return jsonify({"ok": True, "data": sessions})
+
+
+@app.route("/api/admin/kick", methods=["POST"])
+def admin_kick():
+    d = request.json
+    username = d.get("username", "")
+    if not username:
+        return jsonify({"ok": False, "msg": "未指定用户"})
+    user_manager.remove(username)
+    return jsonify({"ok": True, "msg": f"已踢出用户 {username}"})
+
+
+@app.route("/api/admin/stop", methods=["POST"])
+def admin_stop():
+    d = request.json
+    username = d.get("username", "")
+    if not username:
+        return jsonify({"ok": False, "msg": "未指定用户"})
+    us = user_manager.get(username)
+    if not us:
+        return jsonify({"ok": False, "msg": "用户不在线"})
+    us.monitoring = False
+    return jsonify({"ok": True, "msg": f"已停止 {username} 的监测"})
+
+
+# ─── 业务路由 ─────────────────────────────────────────────────────────────────
 
 @app.route("/api/captcha", methods=["POST"])
 def api_captcha():
     """获取验证码图片（启动浏览器 + 截图 + OCR）"""
+    us = get_user_session()
     try:
-        img_bytes, cookies = _state["browser"].fetch_captcha()
-        _state["captcha_cookies"] = cookies
-        _state["api"].set_cookies(cookies)
+        img_bytes, cookies = browser_manager.fetch_captcha()
+        us.captcha_cookies = cookies
+        us.api.set_cookies(cookies)
         b64 = base64.b64encode(img_bytes).decode()
-        ocr_text = _state["ocr"].classification(img_bytes)
-        log(f"验证码获取成功，OCR识别: {ocr_text}")
+        ocr_text = ocr_engine.classification(img_bytes)
+        user_log(us, f"验证码获取成功，OCR识别: {ocr_text}")
         return jsonify({"ok": True, "image": b64, "ocr": ocr_text})
     except Exception as e:
-        log(f"获取验证码失败: {e}")
+        user_log(us, f"获取验证码失败: {e}")
         return jsonify({"ok": False, "msg": str(e)})
 
 
 @app.route("/api/login", methods=["POST"])
 def api_login():
+    us = get_user_session()
     d = request.json
     phone, pwd, captcha = d.get("phone", ""), d.get("password", ""), d.get("captcha", "")
     if not phone or not pwd or not captcha:
         return jsonify({"ok": False, "msg": "请填写完整登录信息"})
     try:
-        result = _state["api"].login(phone, pwd, captcha)
+        result = us.api.login(phone, pwd, captcha)
         if result.get("code") == 0 and result.get("iRtn") == 0:
-            log(f"登录成功 token={_state['api'].token[:12]}...")
+            user_log(us, f"登录成功 token={us.api.token[:12]}...")
             return jsonify({"ok": True})
         msg = result.get("msg", "登录失败")
-        log(f"登录失败: {msg}")
+        user_log(us, f"登录失败: {msg}")
         return jsonify({"ok": False, "msg": msg})
     except Exception as e:
-        log(f"登录异常: {e}")
+        user_log(us, f"登录异常: {e}")
         return jsonify({"ok": False, "msg": str(e)})
 
 
 @app.route("/api/programs")
 def api_programs():
+    us = get_user_session()
     try:
-        _state["programs"] = _state["api"].get_program_list()
-        log(f"加载到 {len(_state['programs'])} 个剧目")
-        return jsonify({"ok": True, "data": _state["programs"]})
+        us.programs = us.api.get_program_list()
+        user_log(us, f"加载到 {len(us.programs)} 个剧目")
+        return jsonify({"ok": True, "data": us.programs})
     except Exception as e:
-        log(f"加载剧目失败: {e}")
+        user_log(us, f"加载剧目失败: {e}")
         return jsonify({"ok": False, "msg": str(e)})
 
 
 @app.route("/api/events/<int:pid>")
 def api_events(pid):
+    us = get_user_session()
     try:
-        events, prog_info = _state["api"].get_events(pid)
-        _state["events"] = events
-        _state["sel_program_id"] = pid
-        for p in _state["programs"]:
+        events, prog_info = us.api.get_events(pid)
+        us.events = events
+        us.sel_program_id = pid
+        for p in us.programs:
             if p["id"] == pid:
-                _state["sel_program_name"] = p["name"]
+                us.sel_program_name = p["name"]
                 break
-        log(f"加载到 {len(events)} 个场次")
+        user_log(us, f"加载到 {len(events)} 个场次")
         return jsonify({"ok": True, "data": events, "program_info": prog_info})
     except Exception as e:
-        log(f"加载场次失败: {e}")
+        user_log(us, f"加载场次失败: {e}")
         return jsonify({"ok": False, "msg": str(e)})
 
 
 @app.route("/api/prices/<int:eid>")
 def api_prices(eid):
+    us = get_user_session()
     try:
-        prices = _state["api"].get_price_levels(eid)
-        _state["prices"] = prices
-        _state["sel_event_id"] = eid
-        for e in _state["events"]:
+        prices = us.api.get_price_levels(eid)
+        us.prices = prices
+        us.sel_event_id = eid
+        for e in us.events:
             if e["event_id"] == eid:
-                _state["sel_event_dt"] = e["datetime"][:16]
+                us.sel_event_dt = e["datetime"][:16]
                 break
-        log(f"加载到 {len(prices)} 个票档")
+        user_log(us, f"加载到 {len(prices)} 个票档")
         return jsonify({"ok": True, "data": prices})
     except Exception as e:
-        log(f"加载票档失败: {e}")
+        user_log(us, f"加载票档失败: {e}")
         return jsonify({"ok": False, "msg": str(e)})
 
 
 @app.route("/api/select_price", methods=["POST"])
 def api_select_price():
+    us = get_user_session()
     d = request.json
     price_id = d.get("price_id")
-    for p in _state["prices"]:
+    for p in us.prices:
         if p["price_id"] == price_id:
-            _state["sel_price_id"] = price_id
-            _state["sel_price_info"] = p
-            log(f"已选择票档: ¥{p['price_amt']:.0f} {p['desc']}")
+            us.sel_price_id = price_id
+            us.sel_price_info = p
+            user_log(us, f"已选择票档: ¥{p['price_amt']:.0f} {p['desc']}")
             return jsonify({"ok": True})
     return jsonify({"ok": False, "msg": "未找到该票档"})
 
 
 @app.route("/api/monitor/start", methods=["POST"])
 def api_monitor_start():
-    if _state["monitoring"]:
+    us = get_user_session()
+    if us.monitoring:
         return jsonify({"ok": False, "msg": "监测已在运行"})
-    if not _state["sel_event_id"] or not _state["sel_price_id"]:
+    if not us.sel_event_id or not us.sel_price_id:
         return jsonify({"ok": False, "msg": "请先选择场次和票档"})
-    if not _state["api"].token:
+    if not us.api.token:
         return jsonify({"ok": False, "msg": "请先登录"})
 
     d = request.json or {}
@@ -780,50 +1113,56 @@ def api_monitor_start():
 
     event_if_begin = 1
     is_select_seat = False
-    for ev in _state["events"]:
-        if ev["event_id"] == _state["sel_event_id"]:
+    for ev in us.events:
+        if ev["event_id"] == us.sel_event_id:
             event_if_begin = ev["if_begin"]
             is_select_seat = ev.get("select_seat") == 1
             break
 
-    _state["monitoring"] = True
-    _state["monitor_thread"] = threading.Thread(
+    us.monitoring = True
+    us.monitor_thread = threading.Thread(
         target=_monitor_loop,
-        args=(_state["sel_event_id"], _state["sel_price_id"], qty, interval,
+        args=(us, us.sel_event_id, us.sel_price_id, qty, interval,
               event_if_begin, is_select_seat), daemon=True)
-    _state["monitor_thread"].start()
+    us.monitor_thread.start()
 
     seat_str = "选座" if is_select_seat else "无座"
-    log(f"开始监测 | 场次:{_state['sel_event_id']} 票档:¥{_state['sel_price_info']['price_amt']:.0f} "
+    user_log(us, f"开始监测 | 场次:{us.sel_event_id} 票档:¥{us.sel_price_info['price_amt']:.0f} "
         f"间隔:{interval}s 数量:{qty} 类型:{seat_str}")
     return jsonify({"ok": True})
 
 
 @app.route("/api/monitor/stop", methods=["POST"])
 def api_monitor_stop():
-    _state["monitoring"] = False
-    log("监测已停止")
+    us = get_user_session()
+    us.monitoring = False
+    user_log(us, "监测已停止")
     return jsonify({"ok": True})
 
 
 @app.route("/api/monitor/status")
 def api_monitor_status():
-    return jsonify({"monitoring": _state["monitoring"]})
+    us = get_user_session()
+    return jsonify({"monitoring": us.monitoring})
 
 
 @app.route("/api/push/config", methods=["POST"])
 def api_push_config():
+    us = get_user_session()
     d = request.json
-    _state["push_method"] = d.get("method", "wxpusher")
-    _state["push_key"] = d.get("key", "")
-    _state["push_uid"] = d.get("uid", "")
-    log(f"推送配置已更新: method={_state['push_method']}")
+    us.push_method = d.get("method", "wxpusher")
+    us.push_key = d.get("key", "")
+    us.push_uid = d.get("uid", "")
+    if us.username:
+        _save_user_config(us.username, us)
+    user_log(us, f"推送配置已更新: method={us.push_method}")
     return jsonify({"ok": True})
 
 
 @app.route("/api/push/test", methods=["POST"])
 def api_push_test():
-    method, key, uid = _state["push_method"], _state["push_key"], _state["push_uid"]
+    us = get_user_session()
+    method, key, uid = us.push_method, us.push_key, us.push_uid
     if not key:
         return jsonify({"ok": False, "msg": "未配置推送Key"})
     try:
@@ -845,13 +1184,13 @@ def api_push_test():
 @app.route("/api/logs/stream")
 def api_logs_stream():
     """SSE 实时日志流"""
+    us = get_user_session()
     q = queue.Queue(maxsize=500)
-    with _sub_lock:
-        _log_subscribers.append(q)
+    with us._log_lock:
+        us.log_subscribers.append(q)
 
     def generate():
-        # 先发送最近的历史日志
-        for line in list(_log_buf):
+        for line in list(us.log_buf):
             yield f"data: {json.dumps({'msg': line}, ensure_ascii=False)}\n\n"
         try:
             while True:
@@ -863,9 +1202,9 @@ def api_logs_stream():
         except GeneratorExit:
             pass
         finally:
-            with _sub_lock:
-                if q in _log_subscribers:
-                    _log_subscribers.remove(q)
+            with us._log_lock:
+                if q in us.log_subscribers:
+                    us.log_subscribers.remove(q)
 
     return Response(generate(), mimetype="text/event-stream",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
@@ -873,15 +1212,15 @@ def api_logs_stream():
 
 # ─── 监控循环 ──────────────────────────────────────────────────────────────────
 
-def _send_notification(event_id, price_id, qty, success):
-    method, key, uid = _state["push_method"], _state["push_key"], _state["push_uid"]
+def _send_notification(us: UserSession, event_id, price_id, qty, success):
+    method, key, uid = us.push_method, us.push_key, us.push_uid
     if not key:
-        log("未配置推送Key，跳过微信通知")
+        user_log(us, "未配置推送Key，跳过微信通知")
         return
     title = "购票成功通知"
-    price_str = f"¥{_state['sel_price_info']['price_amt']:.0f}" if _state["sel_price_info"] else f"ID:{price_id}"
-    content = (f"剧目: {_state['sel_program_name'] or '上海文化广场'}\n"
-               f"场次: {_state['sel_event_dt'] or event_id}\n"
+    price_str = f"¥{us.sel_price_info['price_amt']:.0f}" if us.sel_price_info else f"ID:{price_id}"
+    content = (f"剧目: {us.sel_program_name or '上海文化广场'}\n"
+               f"场次: {us.sel_event_dt or event_id}\n"
                f"票档: {price_str}\n数量: {qty}\n"
                f"状态: {'下单成功' if success else '发现余票'}\n"
                f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n请尽快前往购物车完成支付！")
@@ -894,87 +1233,87 @@ def _send_notification(event_id, price_id, qty, success):
             ok, detail = WeChatNotifier.send_wxpusher(key, [uid], title, content) if uid else (False, "未配置UID")
         else:
             ok, detail = False, "未知推送方式"
-        log(f"推送{'成功' if ok else '失败'}: {detail}")
+        user_log(us, f"推送{'成功' if ok else '失败'}: {detail}")
     except Exception as e:
-        log(f"推送异常: {e}")
+        user_log(us, f"推送异常: {e}")
 
 
-def _monitor_loop(event_id, price_id, qty, interval, event_if_begin, is_select_seat):
+def _monitor_loop(us: UserSession, event_id, price_id, qty, interval, event_if_begin, is_select_seat):
     count = 0
     refresh_counter = 0
     err_streak = 0
     start_time = time.time()
-    while _state["monitoring"]:
+    while us.monitoring:
         count += 1
         refresh_counter += 1
         try:
-            if refresh_counter >= 10 and _state["sel_program_id"]:
+            if refresh_counter >= 10 and us.sel_program_id:
                 refresh_counter = 0
                 try:
-                    events, _ = _state["api"].get_events(_state["sel_program_id"])
+                    events, _ = us.api.get_events(us.sel_program_id)
                     for ev in events:
                         if ev["event_id"] == event_id:
                             if ev["if_begin"] != event_if_begin:
-                                log(f"场次状态变更: IF_BEGIN {event_if_begin} -> {ev['if_begin']}")
+                                user_log(us, f"场次状态变更: IF_BEGIN {event_if_begin} -> {ev['if_begin']}")
                                 event_if_begin = ev["if_begin"]
                             break
                 except Exception as e:
-                    log(f"刷新场次状态失败: {e}", flush=True)
+                    user_log(us, f"刷新场次状态失败: {e}", flush=True)
 
             if count % 100 == 0:
                 elapsed = time.time() - start_time
-                log(f"--- 运行摘要 | 已查询{count}次 | 运行{elapsed/60:.1f}分钟 | 间隔{interval}s | 连续错误{err_streak}次 ---")
+                user_log(us, f"--- 运行摘要 | 已查询{count}次 | 运行{elapsed/60:.1f}分钟 | 间隔{interval}s | 连续错误{err_streak}次 ---")
 
-            info = _state["api"].check_price_availability(event_id, price_id, event_if_begin)
+            info = us.api.check_price_availability(event_id, price_id, event_if_begin)
             err_streak = 0
             ts = datetime.now().strftime("%H:%M:%S")
 
             if info["available"]:
-                log(f"[{ts}] #{count} 发现有票（余{info['seat_cnt']}张）！尝试下单...")
-                buy_result = _state["api"].buy_ticket(event_id, price_id, qty)
+                user_log(us, f"[{ts}] #{count} 发现有票（余{info['seat_cnt']}张）！尝试下单...")
+                buy_result = us.api.buy_ticket(event_id, price_id, qty)
                 if buy_result.get("code") == 0:
-                    log(f"[{ts}] 下单成功! 请前往购物车完成支付", flush=True)
-                    _send_notification(event_id, price_id, qty, True)
-                    _state["monitoring"] = False
+                    user_log(us, f"[{ts}] 下单成功! 请前往购物车完成支付", flush=True)
+                    _send_notification(us, event_id, price_id, qty, True)
+                    us.monitoring = False
                     return
                 msg = buy_result.get("msg", "未知错误")
                 code = buy_result.get("code", "?")
-                log(f"[{ts}] #{count} 下单失败 code={code} - {msg}")
+                user_log(us, f"[{ts}] #{count} 下单失败 code={code} - {msg}")
 
                 if code == 3567 and is_select_seat:
-                    log(f"[{ts}] 该场次为选座事件，尝试 Playwright 自动选座...")
+                    user_log(us, f"[{ts}] 该场次为选座事件，尝试 Playwright 自动选座...")
                     try:
                         seat_result = BrowserManager.select_seat_and_buy(
-                            _state["sel_program_id"], event_id, price_id,
-                            _state["captcha_cookies"], _state["api"].token, qty,
-                            log_callback=log)
+                            us.sel_program_id, event_id, price_id,
+                            us.captcha_cookies, us.api.token, qty,
+                            log_callback=lambda msg: user_log(us, msg))
                         if seat_result.get("code") == 0:
-                            log(f"[{ts}] 选座下单成功!", flush=True)
-                            _send_notification(event_id, price_id, qty, True)
-                            _state["monitoring"] = False
+                            user_log(us, f"[{ts}] 选座下单成功!", flush=True)
+                            _send_notification(us, event_id, price_id, qty, True)
+                            us.monitoring = False
                             return
                         else:
-                            log(f"[{ts}] 选座失败: {seat_result.get('msg')}")
+                            user_log(us, f"[{ts}] 选座失败: {seat_result.get('msg')}")
                     except Exception as se:
-                        log(f"[{ts}] 选座异常: {se}")
+                        user_log(us, f"[{ts}] 选座异常: {se}")
 
                 if code == 10001:
-                    log("登录已过期，请重新登录后再监测", flush=True)
-                    _state["monitoring"] = False
+                    user_log(us, "登录已过期，请重新登录后再监测", flush=True)
+                    us.monitoring = False
                     return
             else:
                 ib = info.get("if_begin", 0)
                 if ib != 1:
                     status_map = {0: "未开票", 2: "已结束"}
-                    log(f"[{ts}] #{count} {status_map.get(ib, '未开票/已暂停')}（IF_BEGIN={ib}）")
+                    user_log(us, f"[{ts}] #{count} {status_map.get(ib, '未开票/已暂停')}（IF_BEGIN={ib}）")
                 else:
-                    log(f"[{ts}] #{count} 暂无余票（余{info['seat_cnt']}张）")
+                    user_log(us, f"[{ts}] #{count} 暂无余票（余{info['seat_cnt']}张）")
 
         except Exception as e:
             err_streak += 1
-            log(f"[{datetime.now().strftime('%H:%M:%S')}] #{count} 查询异常 (连续第{err_streak}次) - {e}")
+            user_log(us, f"[{datetime.now().strftime('%H:%M:%S')}] #{count} 查询异常 (连续第{err_streak}次) - {e}")
             if err_streak >= 10:
-                log(f"警告：连续{err_streak}次查询异常，可能存在网络问题或IP被限流", flush=True)
+                user_log(us, f"警告：连续{err_streak}次查询异常，可能存在网络问题或IP被限流", flush=True)
 
         time.sleep(interval)
 
@@ -982,5 +1321,5 @@ def _monitor_loop(event_id, price_id, qty, interval, event_if_begin, is_select_s
 # ─── 启动 ──────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    log("Web 服务启动")
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Web 服务启动，访问密码: {ACCESS_PASSWORD}")
     app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)

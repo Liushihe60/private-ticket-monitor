@@ -158,6 +158,8 @@ body{font-family:-apple-system,"Microsoft YaHei","Segoe UI",sans-serif;backgroun
   <div class="sidebar-footer">
     <div class="status-dot" id="statusDot"></div>
     <span class="status-text" id="statusText">未运行</span>
+    <span style="margin-left:auto;font-size:12px;color:var(--text2)" id="usernameDisplay"></span>
+    <span style="cursor:pointer;font-size:12px;color:var(--text2)" onclick="logout()" title="退出登录">&#x23FB;</span>
   </div>
 </div>
 
@@ -334,7 +336,7 @@ let logBox = document.getElementById('logBox');
 let evtSource = null;
 function connectSSE() {
   if (evtSource) evtSource.close();
-  evtSource = new EventSource(API_BASE + '/api/logs/stream');
+  evtSource = new EventSource(API_BASE + '/api/logs/stream', {withCredentials: true});
   evtSource.onmessage = function(e) {
     try {
       let d = JSON.parse(e.data);
@@ -361,8 +363,25 @@ connectSSE();
 
 // ─── API ───
 async function api(url, opts) {
+  opts = opts || {};
+  opts.credentials = 'include';
   let resp = await fetch(API_BASE + url, opts);
+  if (resp.status === 401) { window.location.href = API_BASE + '/'; return {ok: false, msg: '未登录'}; }
   return await resp.json();
+}
+
+// ─── 加载用户名 ───
+(async function() {
+  try {
+    let r = await api('/api/auth/check');
+    if (r.username) document.getElementById('usernameDisplay').textContent = r.username;
+  } catch(e) {}
+})();
+
+// ─── 登出 ───
+async function logout() {
+  await fetch(API_BASE + '/api/auth/logout', {method:'POST', credentials:'include'});
+  window.location.href = API_BASE + '/';
 }
 
 // ─── 登录 ───

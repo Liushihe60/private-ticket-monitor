@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开发者后台 - 余票监测</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --bg:#0f0f1a;--card:#1a1a2e;--card2:#16213e;
+  --accent:#6c63ff;--accent2:#3b82f6;--green:#10b981;--red:#ef4444;--yellow:#f59e0b;
+  --text:#e2e8f0;--text2:#94a3b8;--border:#2d2d44;
+}
+body{font-family:-apple-system,"Microsoft YaHei","Segoe UI",sans-serif;background:var(--bg);color:var(--text);min-height:100vh;padding:24px}
+.header{display:flex;align-items:center;justify-content:space-between;margin-bottom:24px}
+.header h1{font-size:20px;font-weight:600}
+.header .actions{display:flex;gap:12px;align-items:center}
+.header .actions span{font-size:13px;color:var(--text2)}
+.btn-sm{padding:6px 14px;border:none;border-radius:6px;font-size:12px;font-weight:500;cursor:pointer;transition:all .2s}
+.btn-danger{background:rgba(239,68,68,.15);color:var(--red)}
+.btn-danger:hover{background:rgba(239,68,68,.25)}
+.btn-warning{background:rgba(245,158,11,.15);color:var(--yellow)}
+.btn-warning:hover{background:rgba(245,158,11,.25)}
+.btn-ghost{background:transparent;color:var(--text2);border:1px solid var(--border)}
+.btn-ghost:hover{border-color:var(--text2)}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px;margin-bottom:24px}
+.stat-card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px}
+.stat-card .label{font-size:12px;color:var(--text2);margin-bottom:8px}
+.stat-card .value{font-size:28px;font-weight:700;color:#fff}
+.stat-card .value.green{color:var(--green)}
+.stat-card .value.yellow{color:var(--yellow)}
+.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px;margin-bottom:20px}
+.card-title{font-size:15px;font-weight:600;margin-bottom:16px;display:flex;align-items:center;gap:8px}
+table{width:100%;border-collapse:collapse}
+th{text-align:left;font-size:12px;color:var(--text2);font-weight:500;padding:10px 12px;border-bottom:1px solid var(--border)}
+td{font-size:13px;padding:10px 12px;border-bottom:1px solid rgba(45,45,68,.5)}
+tr:hover td{background:rgba(108,99,255,.04)}
+.badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:500}
+.badge-online{background:rgba(16,185,129,.15);color:var(--green)}
+.badge-offline{background:rgba(148,163,184,.1);color:var(--text2)}
+.badge-monitoring{background:rgba(239,68,68,.15);color:var(--red);animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+.empty{text-align:center;color:var(--text2);font-size:13px;padding:32px 0}
+.toast{position:fixed;top:20px;right:20px;padding:12px 20px;border-radius:8px;font-size:13px;z-index:1000;animation:slideIn .3s}
+.toast-ok{background:rgba(16,185,129,.15);color:var(--green);border:1px solid rgba(16,185,129,.3)}
+.toast-err{background:rgba(239,68,68,.15);color:var(--red);border:1px solid rgba(239,68,68,.3)}
+@keyframes slideIn{from{opacity:0;transform:translateX(20px)}to{opacity:1;transform:translateX(0)}}
+.actions-cell{display:flex;gap:6px}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>开发者后台</h1>
+  <div class="actions">
+    <span id="refreshTime"></span>
+    <button class="btn-sm btn-ghost" onclick="loadData()">刷新</button>
+    <button class="btn-sm btn-ghost" onclick="logout()">退出登录</button>
+  </div>
+</div>
+
+<div class="stats" id="statsArea"></div>
+
+<div class="card">
+  <div class="card-title">注册用户</div>
+  <div id="usersTable"></div>
+</div>
+
+<div class="card">
+  <div class="card-title">实时监测活动</div>
+  <div id="sessionsTable"></div>
+</div>
+
+<script>
+function toast(msg, ok) {
+  var el = document.createElement('div');
+  el.className = 'toast ' + (ok ? 'toast-ok' : 'toast-err');
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(function() { el.remove(); }, 3000);
+}
+
+async function api(url, opts) {
+  opts = opts || {};
+  opts.credentials = 'include';
+  var resp = await fetch(url, opts);
+  if (resp.status === 401) { window.location.href = '/admin'; return {ok: false}; }
+  return await resp.json();
+}
+
+async function logout() {
+  await fetch('/api/auth/logout', {method: 'POST', credentials: 'include'});
+  window.location.href = '/admin';
+}
+
+function renderStats(users, sessions) {
+  var onlineCount = users.filter(function(u) { return u.online; }).length;
+  var monitoringCount = sessions.filter(function(s) { return s.monitoring; }).length;
+  document.getElementById('statsArea').innerHTML =
+    '<div class="stat-card"><div class="label">注册用户</div><div class="value">' + users.length + '</div></div>' +
+    '<div class="stat-card"><div class="label">当前在线</div><div class="value green">' + onlineCount + '</div></div>' +
+    '<div class="stat-card"><div class="label">监测中</div><div class="value yellow">' + monitoringCount + '</div></div>';
+}
+
+function renderUsers(users) {
+  if (!users.length) {
+    document.getElementById('usersTable').innerHTML = '<div class="empty">暂无注册用户</div>';
+    return;
+  }
+  var html = '<table><thead><tr><th>用户名</th><th>注册时间</th><th>最后登录</th><th>登录次数</th><th>状态</th><th>操作</th></tr></thead><tbody>';
+  users.forEach(function(u) {
+    var statusBadge = u.online
+      ? '<span class="badge badge-online">在线</span>'
+      : '<span class="badge badge-offline">离线</span>';
+    var actions = u.online
+      ? '<div class="actions-cell"><button class="btn-sm btn-warning" onclick="stopMonitor(\'' + u.username + '\')">停止监测</button><button class="btn-sm btn-danger" onclick="kickUser(\'' + u.username + '\')">踢出</button></div>'
+      : '<span style="color:var(--text2);font-size:12px">-</span>';
+    html += '<tr><td>' + u.username + '</td><td>' + u.created_at + '</td><td>' + u.last_login + '</td><td>' + u.login_count + '</td><td>' + statusBadge + '</td><td>' + actions + '</td></tr>';
+  });
+  html += '</tbody></table>';
+  document.getElementById('usersTable').innerHTML = html;
+}
+
+function renderSessions(sessions) {
+  var monitoring = sessions.filter(function(s) { return s.monitoring; });
+  if (!monitoring.length) {
+    document.getElementById('sessionsTable').innerHTML = '<div class="empty">当前无监测活动</div>';
+    return;
+  }
+  var html = '<table><thead><tr><th>用户</th><th>剧目</th><th>场次</th><th>票档</th><th>最后活跃</th><th>操作</th></tr></thead><tbody>';
+  monitoring.forEach(function(s) {
+    var price = s.sel_price_info ? ('¥' + s.sel_price_info.price_amt) : '-';
+    html += '<tr><td>' + s.username + '</td><td>' + (s.sel_program_name || '-') + '</td><td>' + (s.sel_event_dt || '-') + '</td><td>' + price + '</td><td>' + s.last_active + '</td><td><button class="btn-sm btn-danger" onclick="stopMonitor(\'' + s.username + '\')">停止监测</button></td></tr>';
+  });
+  html += '</tbody></table>';
+  document.getElementById('sessionsTable').innerHTML = html;
+}
+
+async function loadData() {
+  var usersResp = await api('/api/admin/users');
+  var sessionsResp = await api('/api/admin/sessions');
+  if (!usersResp.ok || !sessionsResp.ok) return;
+  var users = usersResp.data || [];
+  var sessions = sessionsResp.data || [];
+  renderStats(users, sessions);
+  renderUsers(users);
+  renderSessions(sessions);
+  document.getElementById('refreshTime').textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN', {hour12: false});
+}
+
+async function kickUser(username) {
+  if (!confirm('确定踢出用户 ' + username + '？')) return;
+  var r = await api('/api/admin/kick', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({username: username})
+  });
+  toast(r.msg || (r.ok ? '操作成功' : '操作失败'), r.ok);
+  loadData();
+}
+
+async function stopMonitor(username) {
+  if (!confirm('确定停止 ' + username + ' 的监测？')) return;
+  var r = await api('/api/admin/stop', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({username: username})
+  });
+  toast(r.msg || (r.ok ? '操作成功' : '操作失败'), r.ok);
+  loadData();
+}
+
+loadData();
+setInterval(loadData, 10000);
+</script>
+</body>
+</html>
