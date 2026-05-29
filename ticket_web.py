@@ -1405,5 +1405,6 @@ def _monitor_loop(us: UserSession, event_id, price_id, qty, interval, event_if_b
 
 if __name__ == "__main__":
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Web 服务启动，访问密码: {_get('access_password')}")
+    browser_manager.start()
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 浏览器池就绪 ({browser_manager._pool_size} 个实例，按需启动)")
     app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
