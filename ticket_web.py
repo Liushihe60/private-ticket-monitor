@@ -38,27 +38,68 @@ HEADERS = {
 # ─── 浏览器层 ──────────────────────────────────────────────────────────────────
 
 class BrowserManager:
-    def __init__(self):
-        self._pw = None
-        self._browser = None
+    """浏览器池：维护多个 Chromium 实例以支持并发访问"""
+
+    def __init__(self, pool_size=2):
+        self._pool_size = pool_size
+        self._slots = []  # 每个元素: {"pw": ..., "browser": ..., "lock": Lock()}
+        self._counter = 0
+        self._counter_lock = threading.Lock()
 
     def start(self):
         from playwright.sync_api import sync_playwright
-        self._pw = sync_playwright().start()
-        self._browser = self._pw.chromium.launch(headless=True)
+        self._slots = []
+        for i in range(self._pool_size):
+            pw = sync_playwright().start()
+            browser = pw.chromium.launch(headless=True)
+            self._slots.append({"pw": pw, "browser": browser, "lock": threading.Lock()})
 
     def stop(self):
-        if self._browser:
-            self._browser.close()
-        if self._pw:
-            self._pw.stop()
+        for slot in self._slots:
+            try:
+                if slot["browser"]:
+                    slot["browser"].close()
+            except Exception:
+                pass
+            try:
+                if slot["pw"]:
+                    slot["pw"].stop()
+            except Exception:
+                pass
+        self._slots = []
+
+    def _pick_slot(self) -> dict:
+        """轮询选择一个可用的浏览器槽位，自动恢复崩溃的浏览器"""
+        with self._counter_lock:
+            idx = self._counter % len(self._slots)
+            self._counter += 1
+        slot = self._slots[idx]
+        with slot["lock"]:
+            try:
+                if slot["browser"] is not None:
+                    slot["browser"].contexts
+            except Exception:
+                slot["browser"] = None
+            if slot["browser"] is None:
+                from playwright.sync_api import sync_playwright
+                slot["pw"] = sync_playwright().start()
+                slot["browser"] = slot["pw"].chromium.launch(headless=True)
+        return slot
+
+    def _new_page(self):
+        slot = self._pick_slot()
+        with slot["lock"]:
+            return slot["browser"].new_page()
+
+    def _new_context(self):
+        slot = self._pick_slot()
+        with slot["lock"]:
+            return slot["browser"].new_context()
 
     def fetch_captcha(self) -> tuple[bytes, dict]:
-        """返回 (png_bytes, cookies_dict)"""
-        from playwright.sync_api import sync_playwright
-        with sync_playwright() as pw:
-            browser = pw.chromium.launch(headless=True)
-            page = browser.new_page()
+        """返回 (png_bytes, cookies_dict) — 复用浏览器池，失败自动重试一次"""
+        for attempt in range(2):
+            page = self._new_page()
             try:
                 page.goto(f"{BASE_URL}/PersonalCenter/loginwechat.aspx",
                           wait_until="networkidle", timeout=15000)
@@ -68,388 +109,351 @@ class BrowserManager:
                 img_bytes = captcha_el.screenshot()
                 cookies = {c["name"]: c["value"] for c in page.context.cookies()}
                 return img_bytes, cookies
+            except Exception:
+                if attempt == 0:
+                    continue
+                raise
             finally:
                 page.close()
-                browser.close()
 
-    @staticmethod
-    def login_with_captcha(username: str, password: str, ocr_engine) -> tuple[bool, str, dict]:
-        """一键登录：Playwright 获取验证码 + OCR + HTTP 登录，返回 (成功, 消息, cookies)"""
-        from playwright.sync_api import sync_playwright
-        with sync_playwright() as pw:
-            browser = pw.chromium.launch(headless=True)
-            page = browser.new_page()
-            try:
-                page.goto(f"{BASE_URL}/PersonalCenter/loginwechat.aspx",
-                          wait_until="networkidle", timeout=15000)
-                captcha_el = page.locator("#yanzhengma")
-                if captcha_el.count() == 0:
-                    return False, "页面中未找到验证码元素", {}
-                img_bytes = captcha_el.screenshot()
-                cookies = {c["name"]: c["value"] for c in page.context.cookies()}
-                captcha_text = ocr_engine.classification(img_bytes)
-            finally:
-                page.close()
-                browser.close()
-
-        # 用 requests 发送登录请求
-        import requests as req
-        session = req.Session()
-        for name, value in cookies.items():
-            session.cookies.set(name, value, domain="m.shcstheatre.com")
-        login_url = f"{BASE_URL}/WebAPIWeChat.ashx?op=CustomerLoginWeChat"
-        data = {"username": username, "newpassword": password,
-                "loginsurecode": captcha_text, "sessioncode": captcha_text,
-                "cookieOP_ID": "", "OPEND_ID_COOKIE": ""}
-        resp = session.post(login_url, data=data)
-        result = resp.json()
-        if result.get("code") == 0 and result.get("iRtn") == 0:
-            return True, result.get("token", ""), cookies
-        return False, result.get("msg", "登录失败"), {}
-
-    @staticmethod
-    def select_seat_and_buy(program_id, event_id, price_id,
+    def select_seat_and_buy(self, program_id, event_id, price_id,
                             cookies, token, qty=1, log_callback=None):
         def _do_select():
             def plog(msg):
                 if log_callback:
                     log_callback(msg)
 
-            from playwright.sync_api import sync_playwright
-            with sync_playwright() as pw:
-                browser = pw.chromium.launch(headless=True)
-                context = browser.new_context()
-                page = context.new_page()
-                try:
-                    cookie_list = []
-                    for name, value in cookies.items():
-                        for domain in ("m.shcstheatre.com", "seatmb2.shcstheatre.com"):
-                            cookie_list.append({
-                                "name": name, "value": value,
-                                "domain": domain, "path": "/"
-                            })
-                    if cookie_list:
-                        context.add_cookies(cookie_list)
-                    page.add_init_script(f"window.token='{token}';")
+            context = self._new_context()
+            page = context.new_page()
+            try:
+                cookie_list = []
+                for name, value in cookies.items():
+                    for domain in ("m.shcstheatre.com", "seatmb2.shcstheatre.com"):
+                        cookie_list.append({
+                            "name": name, "value": value,
+                            "domain": domain, "path": "/"
+                        })
+                if cookie_list:
+                    context.add_cookies(cookie_list)
+                page.add_init_script(f"window.token='{token}';")
 
-                    seat_url = (f"{BASE_URL}/Program/ProgramDetailsWeChat.aspx"
-                                f"?xz_program_id={program_id}&xz_event_id={event_id}")
-                    plog(f"正在加载选座页面: {seat_url}")
-                    page.goto(seat_url, wait_until="networkidle", timeout=30000)
-                    page.wait_for_timeout(3000)
+                seat_url = (f"{BASE_URL}/Program/ProgramDetailsWeChat.aspx"
+                            f"?xz_program_id={program_id}&xz_event_id={event_id}")
+                plog(f"正在加载选座页面: {seat_url}")
+                page.goto(seat_url, wait_until="networkidle", timeout=30000)
+                page.wait_for_timeout(3000)
 
-                    # 阶段1：事件选择弹窗
-                    event_modal_visible = page.evaluate("""() => {
-                        let btn = document.querySelector('[onclick*="EventSelectChange"]');
-                        return btn ? (btn.offsetParent !== null) : false;
-                    }""")
-                    if event_modal_visible:
-                        plog("检测到事件选择弹窗，点击确定...")
-                        try:
-                            page.locator("[onclick*='EventSelectChange']").click()
-                        except Exception as e:
-                            plog(f"点击确定失败: {e}")
-                        for i in range(20):
-                            page.wait_for_timeout(500)
-                            still = page.evaluate("""() => {
-                                let b = document.querySelector('[onclick*="EventSelectChange"]');
-                                return b && b.offsetParent !== null;
-                            }""")
-                            if not still:
-                                break
-                        page.wait_for_timeout(1000)
-
-                    # 阶段2：等待座位数据
-                    plog("等待座位数据加载...")
-                    seats_loaded = False
-                    for i in range(60):
+                # 阶段1：事件选择弹窗
+                event_modal_visible = page.evaluate("""() => {
+                    let btn = document.querySelector('[onclick*="EventSelectChange"]');
+                    return btn ? (btn.offsetParent !== null) : false;
+                }""")
+                if event_modal_visible:
+                    plog("检测到事件选择弹窗，点击确定...")
+                    try:
+                        page.locator("[onclick*='EventSelectChange']").click()
+                    except Exception as e:
+                        plog(f"点击确定失败: {e}")
+                    for i in range(20):
                         page.wait_for_timeout(500)
-                        state = page.evaluate("""() => {
-                            let sc = document.querySelectorAll('.s-c').length;
-                            let loading = document.getElementById('cart_load_msg');
-                            let lh = !loading || loading.style.display === 'none' || loading.offsetParent === null;
-                            let pg = typeof pg_seats_data === 'object' ? Object.keys(pg_seats_data).length : 0;
-                            return {sc: sc, loading: lh, pg: pg};
+                        still = page.evaluate("""() => {
+                            let b = document.querySelector('[onclick*="EventSelectChange"]');
+                            return b && b.offsetParent !== null;
                         }""")
-                        if state["sc"] > 0 and state["loading"]:
-                            plog(f"座位数据已加载: {state['sc']}个元素")
-                            seats_loaded = True
+                        if not still:
                             break
-                    if not seats_loaded:
-                        page.screenshot(path="seat_map_no_load.png")
-                        plog("座位数据加载超时")
+                    page.wait_for_timeout(1000)
 
-                    # 阶段3：找匹配座位
-                    price_amount = page.evaluate(f"""(pid) => {{
-                        if (window.price_data && window.price_data[pid]) return window.price_data[pid].I_PRICE_AMT;
-                        return null;
-                    }}""", price_id)
-                    plog(f"price_id={price_id} -> 金额={price_amount}")
+                # 阶段2：等待座位数据
+                plog("等待座位数据加载...")
+                seats_loaded = False
+                for i in range(60):
+                    page.wait_for_timeout(500)
+                    state = page.evaluate("""() => {
+                        let sc = document.querySelectorAll('.s-c').length;
+                        let loading = document.getElementById('cart_load_msg');
+                        let lh = !loading || loading.style.display === 'none' || loading.offsetParent === null;
+                        let pg = typeof pg_seats_data === 'object' ? Object.keys(pg_seats_data).length : 0;
+                        return {sc: sc, loading: lh, pg: pg};
+                    }""")
+                    if state["sc"] > 0 and state["loading"]:
+                        plog(f"座位数据已加载: {state['sc']}个元素")
+                        seats_loaded = True
+                        break
+                if not seats_loaded:
+                    page.screenshot(path="seat_map_no_load.png")
+                    plog("座位数据加载超时")
 
-                    target_seats = page.evaluate(f"""(targetPrice) => {{
-                        let seats = [];
-                        document.querySelectorAll('.s-c').forEach(function(el) {{
-                            let cls = el.className || '';
-                            let pa = el.getAttribute('PA') || '';
-                            let notSale = el.getAttribute('NOT_SALE') || '0';
-                            let is_sold = cls.includes('saled') || cls.includes('mk_saled');
-                            let is_stu = cls.includes('stu') || cls.includes('mk_stu');
-                            if (!is_sold && !is_stu && notSale !== '1' && String(pa) === String(targetPrice)) {{
-                                seats.push({{ed: el.getAttribute('ED')||'', esd: el.getAttribute('ESD')||'',
-                                    zone: el.getAttribute('ZN')||'', row: el.getAttribute('RW')||'',
-                                    col: el.getAttribute('CL')||'', pa: pa}});
-                            }}
-                        }});
-                        return seats;
-                    }}""", price_amount)
-                    plog(f"匹配价格¥{price_amount}的可用座位: {len(target_seats)}个")
+                # 阶段3：找匹配座位
+                price_amount = page.evaluate(f"""(pid) => {{
+                    if (window.price_data && window.price_data[pid]) return window.price_data[pid].I_PRICE_AMT;
+                    return null;
+                }}""", price_id)
+                plog(f"price_id={price_id} -> 金额={price_amount}")
 
-                    # 阶段4：选座
-                    seat_selected = False
-                    if target_seats:
-                        ts = target_seats[0]
-                        ed = ts.get("ed") or str(event_id)
-                        esd = ts.get("esd", "")
-                        result = page.evaluate(f"""(function() {{
-                            try {{
-                                if (typeof SeatsSelected === 'function') {{ SeatsSelected('{ed}', '{esd}'); return {{ok:true}}; }}
-                                return {{ok:false, err:'SeatsSelected not found'}};
-                            }} catch(e) {{ return {{ok:false, err:e.toString()}}; }}
-                        }})()""")
-                        if result.get("ok"):
-                            seat_selected = True
-                            page.wait_for_timeout(1500)
+                target_seats = page.evaluate(f"""(targetPrice) => {{
+                    let seats = [];
+                    document.querySelectorAll('.s-c').forEach(function(el) {{
+                        let cls = el.className || '';
+                        let pa = el.getAttribute('PA') || '';
+                        let notSale = el.getAttribute('NOT_SALE') || '0';
+                        let is_sold = cls.includes('saled') || cls.includes('mk_saled');
+                        let is_stu = cls.includes('stu') || cls.includes('mk_stu');
+                        if (!is_sold && !is_stu && notSale !== '1' && String(pa) === String(targetPrice)) {{
+                            seats.push({{ed: el.getAttribute('ED')||'', esd: el.getAttribute('ESD')||'',
+                                zone: el.getAttribute('ZN')||'', row: el.getAttribute('RW')||'',
+                                col: el.getAttribute('CL')||'', pa: pa}});
+                        }}
+                    }});
+                    return seats;
+                }}""", price_amount)
+                plog(f"匹配价格¥{price_amount}的可用座位: {len(target_seats)}个")
 
-                    if not seat_selected and target_seats:
-                        esd = target_seats[0]["esd"]
-                        page.evaluate(f"""document.querySelector(".s-c[ESD='{esd}']").click()""")
-                        page.wait_for_timeout(1500)
+                # 阶段4：选座
+                seat_selected = False
+                if target_seats:
+                    ts = target_seats[0]
+                    ed = ts.get("ed") or str(event_id)
+                    esd = ts.get("esd", "")
+                    result = page.evaluate(f"""(function() {{
+                        try {{
+                            if (typeof SeatsSelected === 'function') {{ SeatsSelected('{ed}', '{esd}'); return {{ok:true}}; }}
+                            return {{ok:false, err:'SeatsSelected not found'}};
+                        }} catch(e) {{ return {{ok:false, err:e.toString()}}; }}
+                    }})()""")
+                    if result.get("ok"):
                         seat_selected = True
+                        page.wait_for_timeout(1500)
 
-                    page.screenshot(path="seat_map_after_select.png")
+                if not seat_selected and target_seats:
+                    esd = target_seats[0]["esd"]
+                    page.evaluate(f"""document.querySelector(".s-c[ESD='{esd}']").click()""")
+                    page.wait_for_timeout(1500)
+                    seat_selected = True
 
-                    # 阶段5：验证购物车
+                page.screenshot(path="seat_map_after_select.png")
+
+                # 阶段5：验证购物车
+                cart_state = page.evaluate("""() => {
+                    let btn = document.querySelector('[onclick*="Buy"]');
+                    let text = btn ? btn.textContent.trim() : '';
+                    let gray = btn ? btn.className.includes('gray_s') : true;
+                    let selected = document.querySelectorAll('.s-c.selected, .s-c.mk_selected');
+                    return {cart_text: text, gray: gray, selected_count: selected.length};
+                }""")
+                plog(f"购物车状态: {json.dumps(cart_state, ensure_ascii=False)}")
+
+                price_match = re.search(r'￥(\d+)', cart_state.get("cart_text", ""))
+                cart_amount = int(price_match.group(1)) if price_match else 0
+
+                if cart_state.get("selected_count", 0) == 0 and cart_amount == 0:
+                    page.evaluate("typeof CartChange === 'function' && CartChange()")
+                    page.wait_for_timeout(1000)
                     cart_state = page.evaluate("""() => {
-                        let btn = document.querySelector('[onclick*="Buy"]');
-                        let text = btn ? btn.textContent.trim() : '';
-                        let gray = btn ? btn.className.includes('gray_s') : true;
-                        let selected = document.querySelectorAll('.s-c.selected, .s-c.mk_selected');
-                        return {cart_text: text, gray: gray, selected_count: selected.length};
+                        return {selected_count: document.querySelectorAll('.s-c.selected, .s-c.mk_selected').length};
                     }""")
-                    plog(f"购物车状态: {json.dumps(cart_state, ensure_ascii=False)}")
 
-                    price_match = re.search(r'￥(\d+)', cart_state.get("cart_text", ""))
-                    cart_amount = int(price_match.group(1)) if price_match else 0
+                if cart_state.get("selected_count", 0) == 0:
+                    return {"code": -1, "msg": f"未选到座位。目标价格¥{price_amount}，可选{len(target_seats)}个"}
 
-                    if cart_state.get("selected_count", 0) == 0 and cart_amount == 0:
-                        page.evaluate("typeof CartChange === 'function' && CartChange()")
-                        page.wait_for_timeout(1000)
-                        cart_state = page.evaluate("""() => {
-                            return {selected_count: document.querySelectorAll('.s-c.selected, .s-c.mk_selected').length};
-                        }""")
+                # 阶段6：加入购物车
+                if cart_state.get("gray"):
+                    page.evaluate("""() => {
+                        let btn = document.querySelector('.AddShopCar');
+                        if (btn) btn.classList.remove('gray_s');
+                        if (typeof bo_gray !== 'undefined') bo_gray = false;
+                        if (typeof Buy === 'function') Buy();
+                    }""")
+                else:
+                    page.evaluate("typeof Buy === 'function' && Buy()")
+                plog("已触发 Buy()，等待页面跳转...")
 
-                    if cart_state.get("selected_count", 0) == 0:
-                        return {"code": -1, "msg": f"未选到座位。目标价格¥{price_amount}，可选{len(target_seats)}个"}
+                # 阶段7：等待跳转
+                for i in range(30):
+                    page.wait_for_timeout(1000)
+                    cur = page.url
+                    if any(kw in cur for kw in ["OrderStep", "Order", "ShoppingCart", "ShopCar", "Cart", "BuyTicket", "Commit", "PayConfirm"]):
+                        plog(f"已跳转到订单页 ({i+1}s): {cur}")
+                        break
 
-                    # 阶段6：加入购物车
-                    if cart_state.get("gray"):
-                        page.evaluate("""() => {
-                            let btn = document.querySelector('.AddShopCar');
-                            if (btn) btn.classList.remove('gray_s');
-                            if (typeof bo_gray !== 'undefined') bo_gray = false;
-                            if (typeof Buy === 'function') Buy();
-                        }""")
-                    else:
-                        page.evaluate("typeof Buy === 'function' && Buy()")
-                    plog("已触发 Buy()，等待页面跳转...")
+                page.wait_for_timeout(3000)
+                page.screenshot(path="seat_map_order_page.png")
 
-                    # 阶段7：等待跳转
-                    for i in range(30):
-                        page.wait_for_timeout(1000)
-                        cur = page.url
-                        if any(kw in cur for kw in ["OrderStep", "Order", "ShoppingCart", "ShopCar", "Cart", "BuyTicket", "Commit", "PayConfirm"]):
-                            plog(f"已跳转到订单页 ({i+1}s): {cur}")
-                            break
+                # 阶段8：结算 → 弹窗 → 提交 → 友情提示
+                def _page_has_exact_text(text):
+                    return page.evaluate(f"""(function() {{
+                        let target = '{text}';
+                        let els = document.querySelectorAll('button, a, input[type="button"], input[type="submit"], [onclick], [class*="btn"], [class*="Btn"], [class*="pop"], [class*="Pop"], [class*="modal"], [class*="Modal"], [class*="dialog"], [class*="Dialog"], [class*="layer"], [class*="Layer"], [class*="tip"], [class*="Tip"], [class*="hint"], [class*="Hint"], [class*="alert"], [class*="Alert"], [class*="confirm"], [class*="Confirm"], [class*="msg"], [class*="Msg"], div, span, p, label, h1, h2, h3, h4');
+                        for (let el of els) {{
+                            let txt = (el.textContent || el.value || '').trim();
+                            if (txt.includes(target)) {{ let r = el.getBoundingClientRect(); if (r.width > 0 && r.height > 0) return true; }}
+                        }}
+                        return false;
+                    }})()""")
 
-                    page.wait_for_timeout(3000)
-                    page.screenshot(path="seat_map_order_page.png")
+                def _popup_visible():
+                    return page.evaluate("""(function() {
+                        let sels = '[class*="pop"], [class*="Pop"], [class*="modal"], [class*="Modal"], [class*="dialog"], [class*="Dialog"], [class*="layer"], [class*="Layer"], [class*="tip"], [class*="Tip"], [class*="alert"], [class*="Alert"], [class*="confirm"], [class*="Confirm"], [class*="overlay"], [class*="Overlay"], [class*="mask"], [class*="Mask"]';
+                        let els = document.querySelectorAll(sels);
+                        for (let el of els) { let r = el.getBoundingClientRect(); if (r.width > 100 && r.height > 100) return true; }
+                        return false;
+                    })()""")
 
-                    # 阶段8：结算 → 弹窗 → 提交 → 友情提示
-                    def _page_has_exact_text(text):
-                        return page.evaluate(f"""(function() {{
-                            let target = '{text}';
-                            let els = document.querySelectorAll('button, a, input[type="button"], input[type="submit"], [onclick], [class*="btn"], [class*="Btn"], [class*="pop"], [class*="Pop"], [class*="modal"], [class*="Modal"], [class*="dialog"], [class*="Dialog"], [class*="layer"], [class*="Layer"], [class*="tip"], [class*="Tip"], [class*="hint"], [class*="Hint"], [class*="alert"], [class*="Alert"], [class*="confirm"], [class*="Confirm"], [class*="msg"], [class*="Msg"], div, span, p, label, h1, h2, h3, h4');
-                            for (let el of els) {{
-                                let txt = (el.textContent || el.value || '').trim();
-                                if (txt.includes(target)) {{ let r = el.getBoundingClientRect(); if (r.width > 0 && r.height > 0) return true; }}
-                            }}
-                            return false;
-                        }})()""")
+                def _find_button_coords(text):
+                    coords_json = page.evaluate(f"""(function() {{
+                        let target = '{text}';
+                        let clickable = 'button, a, input[type="button"], input[type="submit"], [onclick], [class*="btn"], [class*="Btn"]';
+                        for (let el of document.querySelectorAll(clickable)) {{
+                            let txt = (el.textContent || el.value || '').trim();
+                            if (txt.includes(target)) {{ let r = el.getBoundingClientRect(); if (r.width > 0 && r.height > 0) return JSON.stringify({{x:r.x+r.width/2, y:r.y+r.height/2}}); }}
+                        }}
+                        let popup = '[class*="pop"], [class*="Pop"], [class*="modal"], [class*="Modal"], [class*="dialog"], [class*="Dialog"], [class*="layer"], [class*="Layer"], [class*="tip"], [class*="Tip"], [class*="alert"], [class*="Alert"], [class*="confirm"], [class*="Confirm"], [class*="msg"], [class*="Msg"]';
+                        for (let el of document.querySelectorAll(popup)) {{
+                            let txt = (el.textContent || '').trim();
+                            if (txt.includes(target)) {{ let r = el.getBoundingClientRect(); if (r.width > 0 && r.height > 0) return JSON.stringify({{x:r.x+r.width/2, y:r.y+r.height/2}}); }}
+                        }}
+                        for (let el of document.querySelectorAll('div, span, p, label, h1, h2, h3, h4')) {{
+                            let txt = (el.textContent || '').trim();
+                            if (txt.includes(target) && txt.length < 200) {{ let r = el.getBoundingClientRect(); if (r.width > 0 && r.height > 0) return JSON.stringify({{x:r.x+r.width/2, y:r.y+r.height/2}}); }}
+                        }}
+                        return null;
+                    }})()""")
+                    return json.loads(coords_json) if coords_json else None
 
-                    def _popup_visible():
-                        return page.evaluate("""(function() {
-                            let sels = '[class*="pop"], [class*="Pop"], [class*="modal"], [class*="Modal"], [class*="dialog"], [class*="Dialog"], [class*="layer"], [class*="Layer"], [class*="tip"], [class*="Tip"], [class*="alert"], [class*="Alert"], [class*="confirm"], [class*="Confirm"], [class*="overlay"], [class*="Overlay"], [class*="mask"], [class*="Mask"]';
-                            let els = document.querySelectorAll(sels);
-                            for (let el of els) { let r = el.getBoundingClientRect(); if (r.width > 100 && r.height > 100) return true; }
-                            return false;
-                        })()""")
-
-                    def _find_button_coords(text):
-                        coords_json = page.evaluate(f"""(function() {{
-                            let target = '{text}';
-                            let clickable = 'button, a, input[type="button"], input[type="submit"], [onclick], [class*="btn"], [class*="Btn"]';
-                            for (let el of document.querySelectorAll(clickable)) {{
-                                let txt = (el.textContent || el.value || '').trim();
-                                if (txt.includes(target)) {{ let r = el.getBoundingClientRect(); if (r.width > 0 && r.height > 0) return JSON.stringify({{x:r.x+r.width/2, y:r.y+r.height/2}}); }}
-                            }}
-                            let popup = '[class*="pop"], [class*="Pop"], [class*="modal"], [class*="Modal"], [class*="dialog"], [class*="Dialog"], [class*="layer"], [class*="Layer"], [class*="tip"], [class*="Tip"], [class*="alert"], [class*="Alert"], [class*="confirm"], [class*="Confirm"], [class*="msg"], [class*="Msg"]';
-                            for (let el of document.querySelectorAll(popup)) {{
-                                let txt = (el.textContent || '').trim();
-                                if (txt.includes(target)) {{ let r = el.getBoundingClientRect(); if (r.width > 0 && r.height > 0) return JSON.stringify({{x:r.x+r.width/2, y:r.y+r.height/2}}); }}
-                            }}
-                            for (let el of document.querySelectorAll('div, span, p, label, h1, h2, h3, h4')) {{
-                                let txt = (el.textContent || '').trim();
-                                if (txt.includes(target) && txt.length < 200) {{ let r = el.getBoundingClientRect(); if (r.width > 0 && r.height > 0) return JSON.stringify({{x:r.x+r.width/2, y:r.y+r.height/2}}); }}
-                            }}
-                            return null;
-                        }})()""")
-                        return json.loads(coords_json) if coords_json else None
-
-                    def _click_button_exact(text, step_label, expect_disappear=True):
-                        plog(f"{step_label}: 查找 '{text}'...")
-                        if not _page_has_exact_text(text):
-                            plog(f"  页面上未找到 '{text}'，可能已跳过此步骤")
-                            return True
-                        coords = _find_button_coords(text)
-                        if not coords:
-                            plog(f"  未能获取 '{text}' 的坐标")
-                            return False
-                        had_popup = _popup_visible()
-                        for attempt in range(5):
-                            if expect_disappear:
-                                if had_popup and not _popup_visible():
-                                    plog(f"  弹窗已关闭，'{text}' 点击成功")
-                                    break
-                                if not had_popup and not _page_has_exact_text(text):
-                                    plog(f"  '{text}' 已消失，点击成功")
-                                    break
-                            try:
-                                if attempt == 0:
-                                    btn = page.get_by_text(text, exact=False).first
-                                    if btn.count() > 0 and btn.is_visible():
-                                        btn.click(timeout=5000)
-                                    else:
-                                        page.mouse.click(coords["x"], coords["y"])
-                                elif attempt == 1:
-                                    page.mouse.click(coords["x"], coords["y"])
-                                elif attempt == 2:
-                                    page.evaluate(f"""(function() {{
-                                        let el = document.elementFromPoint({coords['x']}, {coords['y']});
-                                        if (el) {{ ['mousedown','mouseup','click'].forEach(function(t) {{ el.dispatchEvent(new MouseEvent(t, {{bubbles:true,cancelable:true}})); }}); let p = el.closest('a,button,[onclick]'); if (p && p !== el) p.click(); }}
-                                    }})()""")
-                                elif attempt == 3:
-                                    page.evaluate(f"""(function() {{
-                                        let target = '{text}';
-                                        for (let el of document.querySelectorAll('[onclick]')) {{
-                                            if ((el.textContent||'').trim().includes(target)) {{ try {{ eval(el.getAttribute('onclick')); }} catch(e) {{}} return; }}
-                                        }}
-                                    }})()""")
-                                else:
-                                    page.mouse.move(coords["x"], coords["y"])
-                                    page.wait_for_timeout(100)
-                                    page.mouse.down()
-                                    page.wait_for_timeout(80)
-                                    page.mouse.up()
-                            except Exception as e:
-                                plog(f"  第{attempt+1}轮异常: {e}")
-                            page.wait_for_timeout(2000)
-                            new_coords = _find_button_coords(text)
-                            if new_coords:
-                                coords = new_coords
-                        if expect_disappear:
-                            popup_still = had_popup and _popup_visible()
-                            text_still = _page_has_exact_text(text)
-                            if popup_still or (not had_popup and text_still):
-                                plog(f"  重试5轮后 '{text}' 仍存在，此步骤失败")
-                                page.screenshot(path=f"seat_map_{step_label}_failed.png")
-                                return False
-                        plog(f"  '{text}' 点击完成")
-                        page.wait_for_timeout(2000)
-                        page.screenshot(path=f"seat_map_{step_label}.png")
+                def _click_button_exact(text, step_label, expect_disappear=True):
+                    plog(f"{step_label}: 查找 '{text}'...")
+                    if not _page_has_exact_text(text):
+                        plog(f"  页面上未找到 '{text}'，可能已跳过此步骤")
                         return True
-
-                    # Step 1: 结算
-                    plog("=== Step 1: 点击结算 ===")
-                    _click_button_exact("结算", "step1_settle", expect_disappear=False)
-                    page.wait_for_timeout(3000)
-                    page.screenshot(path="seat_map_after_settle.png")
-
-                    # Step 2: 弹窗
-                    plog("=== Step 2: 处理弹窗 ===")
-                    popup_appeared = False
-                    for i in range(10):
-                        if _page_has_exact_text("我知道了"):
-                            popup_appeared = True
-                            break
-                        page.wait_for_timeout(500)
-                    if popup_appeared:
-                        _click_button_exact("我知道了，继续购买", "step2_popup", expect_disappear=True)
-                    else:
-                        for alt_text in ["我知道了", "知道了", "继续", "确定"]:
-                            if _page_has_exact_text(alt_text):
-                                _click_button_exact(alt_text, "step2_alt", expect_disappear=True)
+                    coords = _find_button_coords(text)
+                    if not coords:
+                        plog(f"  未能获取 '{text}' 的坐标")
+                        return False
+                    had_popup = _popup_visible()
+                    for attempt in range(5):
+                        if expect_disappear:
+                            if had_popup and not _popup_visible():
+                                plog(f"  弹窗已关闭，'{text}' 点击成功")
                                 break
+                            if not had_popup and not _page_has_exact_text(text):
+                                plog(f"  '{text}' 已消失，点击成功")
+                                break
+                        try:
+                            if attempt == 0:
+                                btn = page.get_by_text(text, exact=False).first
+                                if btn.count() > 0 and btn.is_visible():
+                                    btn.click(timeout=5000)
+                                else:
+                                    page.mouse.click(coords["x"], coords["y"])
+                            elif attempt == 1:
+                                page.mouse.click(coords["x"], coords["y"])
+                            elif attempt == 2:
+                                page.evaluate(f"""(function() {{
+                                    let el = document.elementFromPoint({coords['x']}, {coords['y']});
+                                    if (el) {{ ['mousedown','mouseup','click'].forEach(function(t) {{ el.dispatchEvent(new MouseEvent(t, {{bubbles:true,cancelable:true}})); }}); let p = el.closest('a,button,[onclick]'); if (p && p !== el) p.click(); }}
+                                }})()""")
+                            elif attempt == 3:
+                                page.evaluate(f"""(function() {{
+                                    let target = '{text}';
+                                    for (let el of document.querySelectorAll('[onclick]')) {{
+                                        if ((el.textContent||'').trim().includes(target)) {{ try {{ eval(el.getAttribute('onclick')); }} catch(e) {{}} return; }}
+                                    }}
+                                }})()""")
+                            else:
+                                page.mouse.move(coords["x"], coords["y"])
+                                page.wait_for_timeout(100)
+                                page.mouse.down()
+                                page.wait_for_timeout(80)
+                                page.mouse.up()
+                        except Exception as e:
+                            plog(f"  第{attempt+1}轮异常: {e}")
+                        page.wait_for_timeout(2000)
+                        new_coords = _find_button_coords(text)
+                        if new_coords:
+                            coords = new_coords
+                    if expect_disappear:
+                        popup_still = had_popup and _popup_visible()
+                        text_still = _page_has_exact_text(text)
+                        if popup_still or (not had_popup and text_still):
+                            plog(f"  重试5轮后 '{text}' 仍存在，此步骤失败")
+                            page.screenshot(path=f"seat_map_{step_label}_failed.png")
+                            return False
+                    plog(f"  '{text}' 点击完成")
                     page.wait_for_timeout(2000)
+                    page.screenshot(path=f"seat_map_{step_label}.png")
+                    return True
 
-                    # Step 3: 提交订单
-                    plog("=== Step 3: 提交订单 ===")
-                    _click_button_exact("提交订单", "step3_submit", expect_disappear=False)
-                    page.wait_for_timeout(3000)
+                # Step 1: 结算
+                plog("=== Step 1: 点击结算 ===")
+                _click_button_exact("结算", "step1_settle", expect_disappear=False)
+                page.wait_for_timeout(3000)
+                page.screenshot(path="seat_map_after_settle.png")
 
-                    # Step 4: 友情提示
-                    plog("=== Step 4: 友情提示弹窗 ===")
-                    hint_appeared = False
-                    for i in range(30):
-                        if _page_has_exact_text("我同意") or _page_has_exact_text("友情提示"):
-                            hint_appeared = True
+                # Step 2: 弹窗
+                plog("=== Step 2: 处理弹窗 ===")
+                popup_appeared = False
+                for i in range(10):
+                    if _page_has_exact_text("我知道了"):
+                        popup_appeared = True
+                        break
+                    page.wait_for_timeout(500)
+                if popup_appeared:
+                    _click_button_exact("我知道了，继续购买", "step2_popup", expect_disappear=True)
+                else:
+                    for alt_text in ["我知道了", "知道了", "继续", "确定"]:
+                        if _page_has_exact_text(alt_text):
+                            _click_button_exact(alt_text, "step2_alt", expect_disappear=True)
                             break
-                        page.wait_for_timeout(500)
-                    if hint_appeared:
-                        page.evaluate("""(function() {
-                            for (let el of document.querySelectorAll('input[type="checkbox"]')) {
-                                let parent = el.closest('div, label, li, p, span, td');
-                                if (parent && (parent.textContent||'').includes('我同意')) { if (!el.checked) el.click(); return true; }
-                            }
-                            for (let lb of document.querySelectorAll('label')) {
-                                if ((lb.textContent||'').includes('我同意')) {
-                                    let cb = (lb.getAttribute('for')) ? document.getElementById(lb.getAttribute('for')) : lb.querySelector('input[type="checkbox"]');
-                                    if (cb && !cb.checked) { cb.click(); return true; }
-                                    lb.click(); return true;
-                                }
-                            }
-                            return false;
-                        })""")
-                        page.wait_for_timeout(500)
-                        _click_button_exact("确定", "step4_confirm", expect_disappear=True)
-                    page.wait_for_timeout(3000)
+                page.wait_for_timeout(2000)
 
-                    # 最终结果
-                    page.screenshot(path="seat_map_final.png")
-                    final_url = page.url
-                    plog(f"最终URL: {final_url}")
-                    if any(ind in final_url for ind in ["OrderStep", "orderdetail", "payresult", "PayResult", "Success", "success", "payconfirm", "PayConfirm"]):
-                        return {"code": 0, "msg": f"选座下单成功! URL: {final_url}"}
-                    final_text = page.evaluate("document.body.innerText.substring(0, 500)")
-                    if any(w in final_text for w in ["下单成功", "订单提交成功", "支付成功"]):
-                        return {"code": 0, "msg": "页面内容显示下单成功"}
-                    return {"code": -1, "msg": f"订单流程未完成。最终URL: {final_url[:100]}"}
-                except Exception as e:
-                    import traceback
-                    return {"code": -1, "msg": f"选座异常: {e}\n{traceback.format_exc()}"}
-                finally:
-                    page.close()
-                    context.close()
-                    browser.close()
+                # Step 3: 提交订单
+                plog("=== Step 3: 提交订单 ===")
+                _click_button_exact("提交订单", "step3_submit", expect_disappear=False)
+                page.wait_for_timeout(3000)
+
+                # Step 4: 友情提示
+                plog("=== Step 4: 友情提示弹窗 ===")
+                hint_appeared = False
+                for i in range(30):
+                    if _page_has_exact_text("我同意") or _page_has_exact_text("友情提示"):
+                        hint_appeared = True
+                        break
+                    page.wait_for_timeout(500)
+                if hint_appeared:
+                    page.evaluate("""(function() {
+                        for (let el of document.querySelectorAll('input[type="checkbox"]')) {
+                            let parent = el.closest('div, label, li, p, span, td');
+                            if (parent && (parent.textContent||'').includes('我同意')) { if (!el.checked) el.click(); return true; }
+                        }
+                        for (let lb of document.querySelectorAll('label')) {
+                            if ((lb.textContent||'').includes('我同意')) {
+                                let cb = (lb.getAttribute('for')) ? document.getElementById(lb.getAttribute('for')) : lb.querySelector('input[type="checkbox"]');
+                                if (cb && !cb.checked) { cb.click(); return true; }
+                                lb.click(); return true;
+                            }
+                        }
+                        return false;
+                    })""")
+                    page.wait_for_timeout(500)
+                    _click_button_exact("确定", "step4_confirm", expect_disappear=True)
+                page.wait_for_timeout(3000)
+
+                # 最终结果
+                page.screenshot(path="seat_map_final.png")
+                final_url = page.url
+                plog(f"最终URL: {final_url}")
+                if any(ind in final_url for ind in ["OrderStep", "orderdetail", "payresult", "PayResult", "Success", "success", "payconfirm", "PayConfirm"]):
+                    return {"code": 0, "msg": f"选座下单成功! URL: {final_url}"}
+                final_text = page.evaluate("document.body.innerText.substring(0, 500)")
+                if any(w in final_text for w in ["下单成功", "订单提交成功", "支付成功"]):
+                    return {"code": 0, "msg": "页面内容显示下单成功"}
+                return {"code": -1, "msg": f"订单流程未完成。最终URL: {final_url[:100]}"}
+            except Exception as e:
+                import traceback
+                return {"code": -1, "msg": f"选座异常: {e}\n{traceback.format_exc()}"}
+            finally:
+                page.close()
+                context.close()
 
         return _do_select()
 
@@ -1364,7 +1368,7 @@ def _monitor_loop(us: UserSession, event_id, price_id, qty, interval, event_if_b
                 if code == 3567 and is_select_seat:
                     user_log(us, f"[{ts}] 该场次为选座事件，尝试 Playwright 自动选座...")
                     try:
-                        seat_result = BrowserManager.select_seat_and_buy(
+                        seat_result = browser_manager.select_seat_and_buy(
                             us.sel_program_id, event_id, price_id,
                             us.captcha_cookies, us.api.token, qty,
                             log_callback=lambda msg: user_log(us, msg))
@@ -1403,4 +1407,7 @@ def _monitor_loop(us: UserSession, event_id, price_id, qty, interval, event_if_b
 
 if __name__ == "__main__":
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Web 服务启动，访问密码: {_get('access_password')}")
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 正在启动 Playwright 浏览器池 ({browser_manager._pool_size} 个实例)...")
+    browser_manager.start()
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 浏览器池就绪 ({browser_manager._pool_size} 个实例)")
     app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)

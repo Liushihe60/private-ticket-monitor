@@ -329,10 +329,12 @@ function toast(msg, ok) {
 // ─── SSE 日志 ───
 let logBox = document.getElementById('logBox');
 let evtSource = null;
+let sseFailCount = 0;
 function connectSSE() {
   if (evtSource) evtSource.close();
   evtSource = new EventSource('/api/logs/stream');
   evtSource.onmessage = function(e) {
+    sseFailCount = 0;
     try {
       let d = JSON.parse(e.data);
       let line = document.createElement('div');
@@ -351,7 +353,9 @@ function connectSSE() {
     } catch(err) {}
   };
   evtSource.onerror = function() {
-    setTimeout(connectSSE, 3000);
+    sseFailCount++;
+    if (sseFailCount >= 5) { window.location.href = '/'; return; }
+    setTimeout(connectSSE, Math.min(3000 * sseFailCount, 15000));
   };
 }
 connectSSE();
@@ -360,9 +364,13 @@ connectSSE();
 async function api(url, opts) {
   opts = opts || {};
   opts.credentials = 'include';
-  let resp = await fetch(url, opts);
-  if (resp.status === 401) { window.location.href = '/'; return {ok: false, msg: '未登录'}; }
-  return await resp.json();
+  try {
+    let resp = await fetch(url, opts);
+    if (resp.status === 401) { window.location.href = '/'; return {ok: false, msg: '未登录'}; }
+    return await resp.json();
+  } catch(err) {
+    return {ok: false, msg: '网络错误，请检查连接后重试'};
+  }
 }
 
 // ─── 登出 ───

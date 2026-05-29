@@ -365,9 +365,13 @@ connectSSE();
 async function api(url, opts) {
   opts = opts || {};
   opts.credentials = 'include';
-  let resp = await fetch(API_BASE + url, opts);
-  if (resp.status === 401) { window.location.href = API_BASE + '/'; return {ok: false, msg: '未登录'}; }
-  return await resp.json();
+  try {
+    let resp = await fetch(API_BASE + url, opts);
+    if (resp.status === 401) { window.location.href = API_BASE + '/'; return {ok: false, msg: '未登录'}; }
+    return await resp.json();
+  } catch(err) {
+    return {ok: false, msg: '网络错误，请检查连接后重试'};
+  }
 }
 
 // ─── 加载用户名 ───

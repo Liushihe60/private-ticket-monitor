@@ -107,9 +107,13 @@ function toast(msg, ok) {
 async function api(url, opts) {
   opts = opts || {};
   opts.credentials = 'include';
-  var resp = await fetch(url, opts);
-  if (resp.status === 401) { window.location.href = '/admin'; return {ok: false}; }
-  return await resp.json();
+  try {
+    var resp = await fetch(url, opts);
+    if (resp.status === 401) { window.location.href = '/admin'; return {ok: false}; }
+    return await resp.json();
+  } catch(err) {
+    return {ok: false, msg: '网络错误，请检查连接后重试'};
+  }
 }
 
 async function logout() {
