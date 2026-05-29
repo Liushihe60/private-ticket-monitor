@@ -805,7 +805,13 @@ class UserManager:
 
 # ─── 共享单例 ─────────────────────────────────────────────────────────────────
 
-ocr_engine = ddddocr.DdddOcr(show_ad=False)
+_ocr_engine = None
+def get_ocr():
+    global _ocr_engine
+    if _ocr_engine is None:
+        _ocr_engine = ddddocr.DdddOcr(show_ad=False)
+    return _ocr_engine
+
 browser_manager = BrowserManager()
 user_manager = UserManager(ttl_seconds=3600)
 
@@ -1079,7 +1085,7 @@ def api_captcha():
         us.captcha_cookies = cookies
         us.api.set_cookies(cookies)
         b64 = base64.b64encode(img_bytes).decode()
-        ocr_text = ocr_engine.classification(img_bytes)
+        ocr_text = get_ocr().classification(img_bytes)
         user_log(us, f"验证码获取成功，OCR识别: {ocr_text}")
         return jsonify({"ok": True, "image": b64, "ocr": ocr_text})
     except Exception as e:
