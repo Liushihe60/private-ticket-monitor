@@ -47,12 +47,9 @@ class BrowserManager:
         self._counter_lock = threading.Lock()
 
     def start(self):
-        from playwright.sync_api import sync_playwright
         self._slots = []
         for i in range(self._pool_size):
-            pw = sync_playwright().start()
-            browser = pw.chromium.launch(headless=True)
-            self._slots.append({"pw": pw, "browser": browser, "lock": threading.Lock()})
+            self._slots.append({"pw": None, "browser": None, "lock": threading.Lock()})
 
     def stop(self):
         for slot in self._slots:
@@ -82,6 +79,7 @@ class BrowserManager:
                 slot["browser"] = None
             if slot["browser"] is None:
                 from playwright.sync_api import sync_playwright
+                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 正在启动浏览器实例...")
                 slot["pw"] = sync_playwright().start()
                 slot["browser"] = slot["pw"].chromium.launch(headless=True)
         return slot
@@ -1407,7 +1405,5 @@ def _monitor_loop(us: UserSession, event_id, price_id, qty, interval, event_if_b
 
 if __name__ == "__main__":
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Web 服务启动，访问密码: {_get('access_password')}")
-    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 正在启动 Playwright 浏览器池 ({browser_manager._pool_size} 个实例)...")
-    browser_manager.start()
-    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 浏览器池就绪 ({browser_manager._pool_size} 个实例)")
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 浏览器池就绪 ({browser_manager._pool_size} 个实例，按需启动)")
     app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
