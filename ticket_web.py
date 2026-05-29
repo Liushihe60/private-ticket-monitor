@@ -877,7 +877,7 @@ def add_cors_headers(response):
 # ─── 认证中间件 ───────────────────────────────────────────────────────────────
 
 PUBLIC_ROUTES = {"/", "/admin", "/api/auth/login", "/api/auth/register",
-                 "/api/auth/check", "/api/admin/login"}
+                 "/api/auth/check", "/api/admin/login", "/wenguang-login"}
 
 
 @app.before_request
@@ -904,10 +904,23 @@ def index():
     return render_template("login.html")
 
 
+@app.route("/wenguang-login")
+def wenguang_login_page():
+    if not session.get("authenticated"):
+        return redirect("/")
+    us = get_user_session()
+    if us.api.token:
+        return redirect("/app")
+    return render_template("wenguang_login.html")
+
+
 @app.route("/app")
 def app_page():
     if not session.get("authenticated"):
         return redirect("/")
+    us = get_user_session()
+    if not us.api.token:
+        return redirect("/wenguang-login")
     return render_template("index.html", username=session.get("username", ""))
 
 
@@ -975,6 +988,12 @@ def auth_logout():
         user_manager.remove(username)
     session.clear()
     return jsonify({"ok": True})
+
+
+@app.route("/api/login/status")
+def api_login_status():
+    us = get_user_session()
+    return jsonify({"ok": True, "logged_in": bool(us.api.token)})
 
 
 # ─── 管理员路由 ───────────────────────────────────────────────────────────────

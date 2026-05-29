@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>登录文广 - 余票监测</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --bg:#111111;--card:#191919;--card2:#1e1e1e;
+  --accent:#c9a96e;--accent2:#d4b87a;--green:#10b981;--red:#ef4444;
+  --text:#d5ceb8;--text2:#787060;--border:#262626;
+}
+body{font-family:-apple-system,"Microsoft YaHei","Segoe UI",sans-serif;background:var(--bg);color:var(--text);min-height:100vh;display:flex;align-items:center;justify-content:center}
+.login-card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:40px;width:420px;max-width:90vw}
+.login-header{text-align:center;margin-bottom:32px}
+.login-header h1{font-size:20px;font-weight:600;color:var(--accent);margin-bottom:8px}
+.login-header p{font-size:13px;color:var(--text2)}
+.form-group{margin-bottom:18px}
+.form-group label{display:block;font-size:13px;color:var(--text2);margin-bottom:8px;font-weight:500}
+.form-group input{width:100%;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px 16px;color:var(--text);font-size:14px;outline:none;transition:border .2s}
+.form-group input:focus{border-color:var(--accent)}
+.form-group input::placeholder{color:#555045}
+.captcha-row{display:flex;align-items:center;gap:12px}
+.captcha-row input{width:120px;flex:none}
+.captcha-ph{height:40px;width:120px;border-radius:6px;border:1px dashed var(--border);display:flex;align-items:center;justify-content:center;font-size:11px;color:#555045;cursor:pointer;transition:all .2s;flex-shrink:0}
+.captcha-ph:hover{border-color:var(--accent);color:var(--text2)}
+.captcha-img{height:40px;border-radius:6px;border:1px solid var(--border);cursor:pointer;transition:border .2s;display:none}
+.captcha-img.loaded{display:block}
+.captcha-img:hover{border-color:var(--accent)}
+.btn{width:100%;padding:12px;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;transition:all .2s}
+.btn-primary{background:var(--accent);color:#111}
+.btn-primary:hover{background:#a8893a;transform:translateY(-1px)}
+.btn-primary:active{transform:translateY(0)}
+.btn:disabled{opacity:.4;cursor:not-allowed;transform:none}
+.btn-outline{background:transparent;border:1px solid var(--border);color:var(--text);padding:8px 16px;width:auto;font-size:13px;margin-top:12px;display:inline-block}
+.btn-outline:hover{border-color:var(--accent);color:var(--accent)}
+.error-msg{color:var(--red);font-size:13px;text-align:center;margin-bottom:12px;min-height:20px}
+.ocr-hint{font-size:11px;color:var(--text2)}
+.skip-row{text-align:center;margin-top:20px;padding-top:16px;border-top:1px solid var(--border)}
+.skip-row a{color:var(--text2);font-size:13px;text-decoration:none;transition:color .2s}
+.skip-row a:hover{color:var(--accent)}
+.toast{position:fixed;top:20px;right:20px;padding:14px 22px;border-radius:10px;color:#fff;font-size:14px;z-index:9999;animation:slideIn .3s;backdrop-filter:blur(8px)}
+.toast-ok{background:rgba(16,185,129,.9)}
+.toast-err{background:rgba(239,68,68,.9)}
+@keyframes slideIn{from{opacity:0;transform:translateX(20px)}to{opacity:1;transform:translateX(0)}}
+</style>
+</head>
+<body>
+<div class="login-card">
+  <div class="login-header">
+    <h1>上海文化广场</h1>
+    <p>登录文广账号以继续</p>
+  </div>
+  <div class="error-msg" id="errMsg"></div>
+  <form id="loginForm">
+    <div class="form-group">
+      <label>手机号</label>
+      <input id="phone" type="text" placeholder="请输入手机号" autofocus>
+    </div>
+    <div class="form-group">
+      <label>密码</label>
+      <input id="password" type="password" placeholder="请输入密码">
+    </div>
+    <div class="form-group">
+      <label>验证码</label>
+      <div class="captcha-row">
+        <input id="captcha" type="text" placeholder="点击获取">
+        <div id="captchaPh" class="captcha-ph" onclick="getCaptcha()">点击获取</div>
+        <img id="captchaImg" class="captcha-img" src="" onclick="getCaptcha()" title="点击刷新">
+        <button type="button" class="btn-outline" onclick="getCaptcha()">刷新</button>
+        <span id="ocrHint" class="ocr-hint"></span>
+      </div>
+    </div>
+    <button type="submit" class="btn btn-primary" id="btnLogin">登录</button>
+  </form>
+  <div class="skip-row">
+    <a href="/app">跳过，直接进入</a>
+  </div>
+</div>
+
+<script>
+function toast(msg, ok) {
+  var el = document.createElement('div');
+  el.className = 'toast ' + (ok ? 'toast-ok' : 'toast-err');
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(function() { el.remove(); }, 3000);
+}
+
+async function getCaptcha() {
+  var r = await (await fetch('/api/captcha', {method:'POST', credentials:'include'})).json();
+  if (r.ok) {
+    var img = document.getElementById('captchaImg');
+    var ph = document.getElementById('captchaPh');
+    img.src = 'data:image/png;base64,' + r.image;
+    img.classList.add('loaded');
+    ph.style.display = 'none';
+    document.getElementById('captcha').value = r.ocr || '';
+    document.getElementById('ocrHint').textContent = r.ocr ? 'OCR: ' + r.ocr : '';
+  } else {
+    toast('获取验证码失败: ' + r.msg, false);
+  }
+}
+
+document.getElementById('loginForm').addEventListener('submit', async function(e) {
+  e.preventDefault();
+  var errEl = document.getElementById('errMsg');
+  var btn = document.getElementById('btnLogin');
+  var phone = document.getElementById('phone').value.trim();
+  var pwd = document.getElementById('password').value.trim();
+  var captcha = document.getElementById('captcha').value.trim();
+  errEl.textContent = '';
+  if (!phone || !pwd || !captcha) { errEl.textContent = '请填写完整登录信息'; return; }
+  btn.disabled = true;
+  btn.textContent = '登录中...';
+  try {
+    var r = await (await fetch('/api/login', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      credentials: 'include',
+      body: JSON.stringify({phone: phone, password: pwd, captcha: captcha})
+    })).json();
+    if (r.ok) {
+      window.location.href = '/app';
+    } else {
+      errEl.textContent = r.msg || '登录失败';
+      btn.disabled = false;
+      btn.textContent = '登录';
+      getCaptcha();
+    }
+  } catch(err) {
+    errEl.textContent = '网络错误';
+    btn.disabled = false;
+    btn.textContent = '登录';
+  }
+});
+</script>
+</body>
+</html>
