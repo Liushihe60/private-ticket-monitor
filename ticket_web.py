@@ -1244,6 +1244,12 @@ def api_monitor_status():
     return jsonify({"monitoring": us.monitoring})
 
 
+@app.route("/api/push/config", methods=["GET"])
+def api_push_config_get():
+    us = get_user_session()
+    return jsonify({"ok": True, "method": us.push_method, "key": us.push_key, "uid": us.push_uid})
+
+
 @app.route("/api/push/config", methods=["POST"])
 def api_push_config():
     us = get_user_session()

@@ -486,6 +486,22 @@ async function testPush() {
   let r = await api('/api/push/test', {method: 'POST'});
   toast(r.msg, r.ok);
 }
+
+async function loadPushConfig() {
+  let r = await api('/api/push/config');
+  if (!r.ok) return;
+  if (r.method) {
+    document.querySelectorAll('.radio-card').forEach(c => c.classList.remove('active'));
+    let radio = document.querySelector('input[name="pushMethod"][value="' + r.method + '"]');
+    if (radio) {
+      radio.checked = true;
+      radio.closest('.radio-card').classList.add('active');
+    }
+  }
+  if (r.key) document.getElementById('pushKey').value = r.key;
+  if (r.uid) document.getElementById('pushUid').value = r.uid;
+}
+loadPushConfig();
 </script>
 </body>
 </html>
