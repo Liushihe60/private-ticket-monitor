@@ -634,6 +634,15 @@ app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(hours=4)
 
 
+@app.after_request
+def _no_cache(resp):
+    if resp.content_type and "text/html" in resp.content_type:
+        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        resp.headers["Pragma"] = "no-cache"
+        resp.headers["Expires"] = "0"
+    return resp
+
+
 # ─── 用户会话管理 ─────────────────────────────────────────────────────────────
 
 CONFIG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs")
