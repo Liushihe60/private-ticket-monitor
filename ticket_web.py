@@ -730,6 +730,15 @@ class UserSession:
         self.push_method = "wxpusher"
         self.push_key = ""
         self.push_uid = ""
+        # 监测参数（供看门狗重启用）
+        self._mon_event_id = None
+        self._mon_price_id = None
+        self._mon_qty = 1
+        self._mon_interval = 3
+        self._mon_if_begin = 1
+        self._mon_is_seat = False
+        self._mon_restart_count = 0
+        self._mon_last_restart = 0.0
         self.created_at = time.time()
         self.last_active = time.time()
         self.log_buf = collections.deque(maxlen=200)
@@ -817,7 +826,37 @@ def _cleanup_loop():
         time.sleep(300)
         user_manager.cleanup_stale()
 
+_WATCHDOG_INTERVAL = 15  # 秒
+_MAX_RESTARTS = 5
+
+def _watchdog_loop():
+    while True:
+        time.sleep(_WATCHDOG_INTERVAL)
+        with user_manager._lock:
+            sessions = list(user_manager._sessions.values())
+        for us in sessions:
+            if not us.monitoring:
+                continue
+            t = us.monitor_thread
+            if t is not None and t.is_alive():
+                continue
+            # 线程已死但 monitoring 仍为 True
+            if us._mon_restart_count >= _MAX_RESTARTS:
+                user_log(us, f"[看门狗] 监测线程已重启{_MAX_RESTARTS}次仍异常退出，停止重启", flush=True)
+                us.monitoring = False
+                continue
+            us._mon_restart_count += 1
+            us._mon_last_restart = time.time()
+            user_log(us, f"[看门狗] 检测到监测线程已退出（第{us._mon_restart_count}次），正在重启...", flush=True)
+            us.monitor_thread = threading.Thread(
+                target=_monitor_loop,
+                args=(us, us._mon_event_id, us._mon_price_id, us._mon_qty,
+                      us._mon_interval, us._mon_if_begin, us._mon_is_seat),
+                daemon=True)
+            us.monitor_thread.start()
+
 threading.Thread(target=_cleanup_loop, daemon=True).start()
+threading.Thread(target=_watchdog_loop, daemon=True).start()
 
 
 # ─── 日志系统（SSE 广播 + 文件按需刷写）────────────────────────────────────────
@@ -1212,6 +1251,13 @@ def api_monitor_start():
             is_select_seat = ev.get("select_seat") == 1
             break
 
+    us._mon_event_id = us.sel_event_id
+    us._mon_price_id = us.sel_price_id
+    us._mon_qty = qty
+    us._mon_interval = interval
+    us._mon_if_begin = event_if_begin
+    us._mon_is_seat = is_select_seat
+    us._mon_restart_count = 0
     us.monitoring = True
     us.monitor_thread = threading.Thread(
         target=_monitor_loop,
