@@ -38,21 +38,17 @@ HEADERS = {
 # ─── 浏览器层 ──────────────────────────────────────────────────────────────────
 
 class BrowserManager:
-    """浏览器池：维护多个 Chromium 实例以支持并发访问"""
+    """浏览器池：每个线程独立的 Chromium 实例，避免 Playwright 线程亲和性问题"""
 
-    def __init__(self, pool_size=2):
-        self._pool_size = pool_size
-        self._slots = []  # 每个元素: {"pw": ..., "browser": ..., "lock": Lock()}
-        self._counter = 0
-        self._counter_lock = threading.Lock()
+    def __init__(self):
+        self._slots = {}  # thread_id -> {"pw": ..., "browser": ..., "lock": Lock()}
+        self._global_lock = threading.Lock()
 
     def start(self):
-        self._slots = []
-        for i in range(self._pool_size):
-            self._slots.append({"pw": None, "browser": None, "lock": threading.Lock()})
+        self._slots = {}
 
     def stop(self):
-        for slot in self._slots:
+        for slot in self._slots.values():
             try:
                 if slot["browser"]:
                     slot["browser"].close()
@@ -63,14 +59,16 @@ class BrowserManager:
                     slot["pw"].stop()
             except Exception:
                 pass
-        self._slots = []
+        self._slots = {}
 
     def _pick_slot(self) -> dict:
-        """轮询选择一个可用的浏览器槽位，自动恢复崩溃的浏览器（调用方需持有返回的锁）"""
-        with self._counter_lock:
-            idx = self._counter % len(self._slots)
-            self._counter += 1
-        slot = self._slots[idx]
+        """获取当前线程专属的浏览器槽位，自动恢复崩溃的浏览器（调用方需持有返回的锁）"""
+        tid = threading.get_ident()
+        with self._global_lock:
+            slot = self._slots.get(tid)
+            if slot is None:
+                slot = {"pw": None, "browser": None, "lock": threading.Lock()}
+                self._slots[tid] = slot
         slot["lock"].acquire()
         try:
             if slot["browser"] is not None:
@@ -79,17 +77,18 @@ class BrowserManager:
             slot["browser"] = None
         if slot["browser"] is None:
             from playwright.sync_api import sync_playwright
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 正在启动浏览器实例...")
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 正在启动浏览器实例 (thread={tid})...")
             slot["pw"] = sync_playwright().start()
             slot["browser"] = slot["pw"].chromium.launch(headless=True)
         return slot
 
     def fetch_captcha(self) -> tuple[bytes, dict]:
-        """返回 (png_bytes, cookies_dict) — 复用浏览器池，失败自动重试一次"""
-        for attempt in range(2):
-            slot = self._pick_slot()
+        """返回 (png_bytes, cookies_dict) — 每次创建独立 Playwright 实例，避免线程亲和性问题"""
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
             try:
-                page = slot["browser"].new_page()
+                page = browser.new_page()
                 try:
                     page.goto(f"{BASE_URL}/PersonalCenter/loginwechat.aspx",
                               wait_until="networkidle", timeout=15000)
@@ -101,12 +100,8 @@ class BrowserManager:
                     return img_bytes, cookies
                 finally:
                     page.close()
-            except Exception:
-                if attempt == 0:
-                    continue
-                raise
             finally:
-                slot["lock"].release()
+                browser.close()
 
     def select_seat_and_buy(self, program_id, event_id, price_id,
                             cookies, token, qty=1, log_callback=None):
@@ -1347,79 +1342,86 @@ def _monitor_loop(us: UserSession, event_id, price_id, qty, interval, event_if_b
     refresh_counter = 0
     err_streak = 0
     start_time = time.time()
-    while us.monitoring:
-        count += 1
-        refresh_counter += 1
-        try:
-            if refresh_counter >= 10 and us.sel_program_id:
-                refresh_counter = 0
-                try:
-                    events, _ = us.api.get_events(us.sel_program_id)
-                    for ev in events:
-                        if ev["event_id"] == event_id:
-                            if ev["if_begin"] != event_if_begin:
-                                user_log(us, f"场次状态变更: IF_BEGIN {event_if_begin} -> {ev['if_begin']}")
-                                event_if_begin = ev["if_begin"]
-                            break
-                except Exception as e:
-                    user_log(us, f"刷新场次状态失败: {e}", flush=True)
-
-            if count % 100 == 0:
-                elapsed = time.time() - start_time
-                user_log(us, f"--- 运行摘要 | 已查询{count}次 | 运行{elapsed/60:.1f}分钟 | 间隔{interval}s | 连续错误{err_streak}次 ---")
-
-            info = us.api.check_price_availability(event_id, price_id, event_if_begin)
-            err_streak = 0
-            ts = datetime.now().strftime("%H:%M:%S")
-
-            if info["available"]:
-                user_log(us, f"[{ts}] #{count} 发现有票（余{info['seat_cnt']}张）！尝试下单...")
-                buy_result = us.api.buy_ticket(event_id, price_id, qty)
-                if buy_result.get("code") == 0:
-                    user_log(us, f"[{ts}] 下单成功! 请前往购物车完成支付", flush=True)
-                    _send_notification(us, event_id, price_id, qty, True)
-                    us.monitoring = False
-                    return
-                msg = buy_result.get("msg", "未知错误")
-                code = buy_result.get("code", "?")
-                user_log(us, f"[{ts}] #{count} 下单失败 code={code} - {msg}")
-
-                if code == 3567 and is_select_seat:
-                    user_log(us, f"[{ts}] 该场次为选座事件，尝试 Playwright 自动选座...")
+    try:
+        while us.monitoring:
+            count += 1
+            refresh_counter += 1
+            try:
+                if refresh_counter >= 10 and us.sel_program_id:
+                    refresh_counter = 0
                     try:
-                        seat_result = browser_manager.select_seat_and_buy(
-                            us.sel_program_id, event_id, price_id,
-                            us.captcha_cookies, us.api.token, qty,
-                            log_callback=lambda msg: user_log(us, msg))
-                        if seat_result.get("code") == 0:
-                            user_log(us, f"[{ts}] 选座下单成功!", flush=True)
-                            _send_notification(us, event_id, price_id, qty, True)
-                            us.monitoring = False
-                            return
-                        else:
-                            user_log(us, f"[{ts}] 选座失败: {seat_result.get('msg')}")
-                    except Exception as se:
-                        user_log(us, f"[{ts}] 选座异常: {se}")
+                        events, _ = us.api.get_events(us.sel_program_id)
+                        for ev in events:
+                            if ev["event_id"] == event_id:
+                                if ev["if_begin"] != event_if_begin:
+                                    user_log(us, f"场次状态变更: IF_BEGIN {event_if_begin} -> {ev['if_begin']}")
+                                    event_if_begin = ev["if_begin"]
+                                break
+                    except Exception as e:
+                        user_log(us, f"刷新场次状态失败: {e}", flush=True)
 
-                if code == 10001:
-                    user_log(us, "登录已过期，请重新登录后再监测", flush=True)
-                    us.monitoring = False
-                    return
-            else:
-                ib = info.get("if_begin", 0)
-                if ib != 1:
-                    status_map = {0: "未开票", 2: "已结束"}
-                    user_log(us, f"[{ts}] #{count} {status_map.get(ib, '未开票/已暂停')}（IF_BEGIN={ib}）")
+                if count % 100 == 0:
+                    elapsed = time.time() - start_time
+                    user_log(us, f"--- 运行摘要 | 已查询{count}次 | 运行{elapsed/60:.1f}分钟 | 间隔{interval}s | 连续错误{err_streak}次 ---")
+
+                info = us.api.check_price_availability(event_id, price_id, event_if_begin)
+                err_streak = 0
+                ts = datetime.now().strftime("%H:%M:%S")
+
+                if info["available"]:
+                    user_log(us, f"[{ts}] #{count} 发现有票（余{info['seat_cnt']}张）！尝试下单...")
+                    buy_result = us.api.buy_ticket(event_id, price_id, qty)
+                    if buy_result.get("code") == 0:
+                        user_log(us, f"[{ts}] 下单成功! 请前往购物车完成支付", flush=True)
+                        _send_notification(us, event_id, price_id, qty, True)
+                        us.monitoring = False
+                        return
+                    msg = buy_result.get("msg", "未知错误")
+                    code = buy_result.get("code", "?")
+                    user_log(us, f"[{ts}] #{count} 下单失败 code={code} - {msg}")
+
+                    if code == 3567 and is_select_seat:
+                        user_log(us, f"[{ts}] 该场次为选座事件，尝试 Playwright 自动选座...")
+                        try:
+                            seat_result = browser_manager.select_seat_and_buy(
+                                us.sel_program_id, event_id, price_id,
+                                us.captcha_cookies, us.api.token, qty,
+                                log_callback=lambda msg: user_log(us, msg))
+                            if seat_result.get("code") == 0:
+                                user_log(us, f"[{ts}] 选座下单成功!", flush=True)
+                                _send_notification(us, event_id, price_id, qty, True)
+                                us.monitoring = False
+                                return
+                            else:
+                                user_log(us, f"[{ts}] 选座失败: {seat_result.get('msg')}")
+                        except Exception as se:
+                            user_log(us, f"[{ts}] 选座异常: {se}")
+
+                    if code == 10001:
+                        user_log(us, "登录已过期，请重新登录后再监测", flush=True)
+                        us.monitoring = False
+                        return
                 else:
-                    user_log(us, f"[{ts}] #{count} 暂无余票（余{info['seat_cnt']}张）")
+                    ib = info.get("if_begin", 0)
+                    if ib != 1:
+                        status_map = {0: "未开票", 2: "已结束"}
+                        user_log(us, f"[{ts}] #{count} {status_map.get(ib, '未开票/已暂停')}（IF_BEGIN={ib}）")
+                    else:
+                        user_log(us, f"[{ts}] #{count} 暂无余票（余{info['seat_cnt']}张）")
 
-        except Exception as e:
-            err_streak += 1
-            user_log(us, f"[{datetime.now().strftime('%H:%M:%S')}] #{count} 查询异常 (连续第{err_streak}次) - {e}")
-            if err_streak >= 10:
-                user_log(us, f"警告：连续{err_streak}次查询异常，可能存在网络问题或IP被限流", flush=True)
+            except Exception as e:
+                err_streak += 1
+                user_log(us, f"[{datetime.now().strftime('%H:%M:%S')}] #{count} 查询异常 (连续第{err_streak}次) - {e}")
+                if err_streak >= 10:
+                    user_log(us, f"警告：连续{err_streak}次查询异常，可能存在网络问题或IP被限流", flush=True)
 
-        time.sleep(interval)
+            time.sleep(interval)
+    except BaseException as e:
+        user_log(us, f"[致命] 监测线程异常退出: {type(e).__name__}: {e}", flush=True)
+    finally:
+        if us.monitoring:
+            user_log(us, "[警告] 监测线程已退出但 monitoring 标志仍为 True，已自动清理", flush=True)
+            us.monitoring = False
 
 
 # ─── 启动 ──────────────────────────────────────────────────────────────────────
@@ -1427,5 +1429,5 @@ def _monitor_loop(us: UserSession, event_id, price_id, qty, interval, event_if_b
 if __name__ == "__main__":
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Web 服务启动，访问密码: {_get('access_password')}")
     browser_manager.start()
-    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 浏览器池就绪 ({browser_manager._pool_size} 个实例，按需启动)")
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 浏览器管理器就绪（按需创建实例）")
     app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
