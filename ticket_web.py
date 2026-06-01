@@ -620,18 +620,35 @@ def _get(key: str) -> str:
 
 _load_site_settings()
 
-# ─── Flask 应用 ────────────────────────────────────────────────────────────────
-
-app = Flask(__name__)
-app.secret_key = os.environ.get("FLASK_SECRET", secrets.token_hex(32))
-app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
-app.config["SESSION_COOKIE_HTTPONLY"] = True
-app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(hours=4)
-
-
 # ─── 用户会话管理 ─────────────────────────────────────────────────────────────
 
 CONFIG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs")
+
+
+# ─── Flask 应用 ────────────────────────────────────────────────────────────────
+
+app = Flask(__name__)
+
+
+def _get_or_create_secret():
+    """获取或创建持久化的 Flask 密钥，确保重启后会话不丢失"""
+    key = os.environ.get("FLASK_SECRET")
+    if key:
+        return key
+    secret_path = os.path.join(CONFIG_DIR, ".flask_secret")
+    if os.path.exists(secret_path):
+        with open(secret_path, "r") as f:
+            return f.read().strip()
+    key = secrets.token_hex(32)
+    with open(secret_path, "w") as f:
+        f.write(key)
+    return key
+
+
+app.secret_key = _get_or_create_secret()
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=7)
 
 
 def _load_user_config(username: str) -> dict:
@@ -784,11 +801,9 @@ class UserManager:
         now = time.time()
         with self._lock:
             expired = [uid for uid, s in self._sessions.items()
-                       if now - s.last_active > self._ttl]
+                       if now - s.last_active > self._ttl and not s.monitoring]
             for uid in expired:
-                sess = self._sessions.pop(uid)
-                if sess.monitoring:
-                    sess.monitoring = False
+                self._sessions.pop(uid)
 
     def get_all_sessions(self) -> list[dict]:
         with self._lock:
@@ -837,6 +852,8 @@ def _watchdog_loop():
         for us in sessions:
             if not us.monitoring:
                 continue
+            # 保持监测中会话的活跃时间，防止被 cleanup_stale 清理
+            us.last_active = time.time()
             t = us.monitor_thread
             if t is not None and t.is_alive():
                 continue
