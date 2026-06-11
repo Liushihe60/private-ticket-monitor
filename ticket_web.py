@@ -675,6 +675,27 @@ def _save_user_config(username: str, us: "UserSession"):
 
 
 REGISTRY_PATH = os.path.join(CONFIG_DIR, "_registry.json")
+INVITE_CODES_PATH = os.path.join(CONFIG_DIR, "_invite_codes.json")
+
+
+def _load_invite_codes() -> list[dict]:
+    if os.path.exists(INVITE_CODES_PATH):
+        try:
+            with open(INVITE_CODES_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return []
+
+
+def _save_invite_codes(codes: list[dict]):
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    with open(INVITE_CODES_PATH, "w", encoding="utf-8") as f:
+        json.dump(codes, f, ensure_ascii=False, indent=2)
+
+
+def _generate_invite_code() -> str:
+    return secrets.token_hex(4).upper()  # 8位注册码
 
 
 def _load_registry() -> dict:
@@ -1007,18 +1028,36 @@ def auth_register():
         return jsonify({"ok": False, "msg": "请求格式错误"})
     username = d.get("username", "").strip()
     password = d.get("password", "")
+    invite_code = d.get("invite_code", "").strip().upper()
     if not username:
         return jsonify({"ok": False, "msg": "请输入用户名"})
     if not password:
         return jsonify({"ok": False, "msg": "请设置密码"})
+    if not invite_code:
+        return jsonify({"ok": False, "msg": "请输入注册码"})
     if len(password) < 4:
         return jsonify({"ok": False, "msg": "密码至少4个字符"})
     if len(username) > 32:
         return jsonify({"ok": False, "msg": "用户名最长32个字符"})
     if not re.match(r'^[a-zA-Z0-9_一-鿿]+$', username):
         return jsonify({"ok": False, "msg": "用户名只能包含字母、数字、下划线和中文"})
+    # 验证注册码
+    codes = _load_invite_codes()
+    code_found = False
+    for c in codes:
+        if c["code"] == invite_code:
+            if c.get("used"):
+                return jsonify({"ok": False, "msg": "该注册码已被使用"})
+            code_found = True
+            c["used"] = True
+            c["used_by"] = username
+            c["used_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            break
+    if not code_found:
+        return jsonify({"ok": False, "msg": "注册码无效"})
     if not _register_user(username, password):
         return jsonify({"ok": False, "msg": "用户名已存在，请直接登录"})
+    _save_invite_codes(codes)
     session["authenticated"] = True
     session["username"] = username
     session.permanent = True
@@ -1145,6 +1184,47 @@ def admin_settings_update():
     return jsonify({"ok": False, "msg": "未填写任何更改"})
 
 
+@app.route("/api/admin/invite-codes")
+def admin_invite_codes():
+    codes = _load_invite_codes()
+    return jsonify({"ok": True, "data": codes})
+
+
+@app.route("/api/admin/invite-codes/generate", methods=["POST"])
+def admin_generate_invite_codes():
+    d = request.json or {}
+    count = d.get("count", 1)
+    if not isinstance(count, int) or count < 1 or count > 100:
+        return jsonify({"ok": False, "msg": "数量范围：1-100"})
+    codes = _load_invite_codes()
+    new_codes = []
+    for _ in range(count):
+        code = _generate_invite_code()
+        while any(c["code"] == code for c in codes):
+            code = _generate_invite_code()
+        entry = {
+            "code": code,
+            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "used": False,
+            "used_by": "",
+            "used_at": "",
+        }
+        codes.append(entry)
+        new_codes.append(entry)
+    _save_invite_codes(codes)
+    return jsonify({"ok": True, "msg": f"已生成 {count} 个注册码", "data": new_codes})
+
+
+@app.route("/api/admin/invite-codes/delete", methods=["POST"])
+def admin_delete_invite_code():
+    d = request.json
+    code = d.get("code", "")
+    codes = _load_invite_codes()
+    codes = [c for c in codes if c["code"] != code]
+    _save_invite_codes(codes)
+    return jsonify({"ok": True, "msg": "已删除"})
+
+
 # ─── 业务路由 ─────────────────────────────────────────────────────────────────
 
 @app.route("/api/captcha", methods=["POST"])
@@ -1187,6 +1267,8 @@ def api_login():
 @app.route("/api/programs")
 def api_programs():
     us = get_user_session()
+    if us.monitoring:
+        return jsonify({"ok": False, "msg": "监测运行中，请先停止监测后再操作"})
     try:
         us.programs = us.api.get_program_list()
         user_log(us, f"加载到 {len(us.programs)} 个剧目")
@@ -1199,6 +1281,8 @@ def api_programs():
 @app.route("/api/events/<int:pid>")
 def api_events(pid):
     us = get_user_session()
+    if us.monitoring:
+        return jsonify({"ok": False, "msg": "监测运行中，请先停止监测后再切换"})
     try:
         events, prog_info = us.api.get_events(pid)
         us.events = events
@@ -1217,6 +1301,8 @@ def api_events(pid):
 @app.route("/api/prices/<int:eid>")
 def api_prices(eid):
     us = get_user_session()
+    if us.monitoring:
+        return jsonify({"ok": False, "msg": "监测运行中，请先停止监测后再切换"})
     try:
         prices = us.api.get_price_levels(eid)
         us.prices = prices
@@ -1235,6 +1321,8 @@ def api_prices(eid):
 @app.route("/api/select_price", methods=["POST"])
 def api_select_price():
     us = get_user_session()
+    if us.monitoring:
+        return jsonify({"ok": False, "msg": "监测运行中，请先停止监测后再切换"})
     d = request.json
     price_id = d.get("price_id")
     for p in us.prices:

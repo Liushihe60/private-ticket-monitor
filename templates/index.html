@@ -75,6 +75,7 @@ body{font-family:-apple-system,"Microsoft YaHei","Segoe UI",sans-serif;backgroun
 .select-col select{width:100%;background:#131313;border:1px solid var(--border);border-radius:8px;padding:8px;color:var(--text);font-size:13px;outline:none}
 .select-col select:focus{border-color:var(--accent);box-shadow:0 0 0 2px rgba(201,169,110,.15)}
 .select-col select option{background:var(--card);padding:4px}
+.select-col select:disabled{opacity:.4;cursor:not-allowed}
 .selection-bar{background:rgba(201,169,110,.06);border:1px solid rgba(201,169,110,.12);border-radius:8px;padding:12px 16px;margin-top:16px;font-size:13px;display:flex;align-items:center;gap:8px}
 .selection-bar::before{content:"\2726";color:var(--accent)}
 
@@ -161,7 +162,7 @@ body{font-family:-apple-system,"Microsoft YaHei","Segoe UI",sans-serif;backgroun
     <div class="panel active" id="panel0">
       <div class="card">
         <div class="card-title"><span class="icon"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 7a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v2H3V7zm0 4h18v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-6zm4 3h4v2H7v-2z"/></svg></span> 加载剧目</div>
-        <button class="btn btn-primary" onclick="loadPrograms()">加载可购票剧目</button>
+        <button id="btnLoadPrograms" class="btn btn-primary" onclick="loadPrograms()">加载可购票剧目</button>
       </div>
       <div class="card">
         <div class="card-title"><span class="icon"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.4 7.4H22l-6 4.4 2.3 7.1L12 16.5 5.7 20.9 8 13.8 2 9.4h7.6L12 2z"/></svg></span> 选择场次和票档</div>
@@ -338,6 +339,7 @@ let programs = [], events = [], prices = [];
 let selProgramId = null, selEventId = null, selPriceId = null, selPriceInfo = null;
 
 async function loadPrograms() {
+  if (monitoring) { toast('监测运行中，请先停止监测', false); return; }
   let r = await api('/api/programs');
   if (!r.ok) { toast(r.msg, false); return; }
   programs = r.data;
@@ -351,6 +353,7 @@ async function loadPrograms() {
 }
 
 async function onProgramChange() {
+  if (monitoring) { toast('监测运行中，请先停止监测', false); return; }
   let sel = document.getElementById('selProgram');
   let pid = parseInt(sel.value);
   if (!pid) return;
@@ -373,6 +376,7 @@ async function onProgramChange() {
 }
 
 async function onEventChange() {
+  if (monitoring) { toast('监测运行中，请先停止监测', false); return; }
   let sel = document.getElementById('selEvent');
   let eid = parseInt(sel.value);
   if (!eid) return;
@@ -393,6 +397,7 @@ async function onEventChange() {
 }
 
 async function onPriceChange() {
+  if (monitoring) { toast('监测运行中，请先停止监测', false); return; }
   let sel = document.getElementById('selPrice');
   let pid = parseInt(sel.value);
   if (!pid) return;
@@ -452,6 +457,13 @@ function setMonitorState(running) {
   let badge = document.getElementById('topBadge');
   badge.textContent = running ? 'MONITORING' : 'IDLE';
   badge.className = 'badge' + (running ? ' live' : '');
+  // 监测运行时锁定下拉栏、加载按钮和参数输入
+  document.getElementById('selProgram').disabled = running;
+  document.getElementById('selEvent').disabled = running;
+  document.getElementById('selPrice').disabled = running;
+  document.getElementById('btnLoadPrograms').disabled = running;
+  document.getElementById('interval').disabled = running;
+  document.getElementById('qty').disabled = running;
 }
 
 setInterval(async () => {

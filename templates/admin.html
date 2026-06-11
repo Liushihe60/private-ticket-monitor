@@ -7,9 +7,9 @@
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 :root{
-  --bg:#111111;--card:#191919;--card2:#1e1e1e;
-  --accent:#c9a96e;--accent2:#d4b87a;--green:#10b981;--red:#ef4444;--yellow:#f59e0b;
-  --text:#d5ceb8;--text2:#787060;--border:#262626;
+  --bg:#161616;--card:#1c1c1c;--card2:#232323;
+  --accent:#c9a96e;--accent2:#d4b87a;--green:#22c55e;--red:#ef4444;--yellow:#f59e0b;
+  --text:#e0dcd4;--text2:#7a756e;--border:#2a2a2a;
 }
 body{font-family:-apple-system,"Microsoft YaHei","Segoe UI",sans-serif;background:var(--bg);color:var(--text);min-height:100vh;padding:24px}
 .header{display:flex;align-items:center;justify-content:space-between;margin-bottom:24px}
@@ -24,12 +24,12 @@ body{font-family:-apple-system,"Microsoft YaHei","Segoe UI",sans-serif;backgroun
 .btn-ghost{background:transparent;color:var(--text2);border:1px solid var(--border)}
 .btn-ghost:hover{border-color:var(--text2)}
 .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px;margin-bottom:24px}
-.stat-card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px}
+.stat-card{background:var(--card);border-radius:12px;padding:20px;box-shadow:0 1px 3px rgba(0,0,0,.3)}
 .stat-card .label{font-size:12px;color:var(--text2);margin-bottom:8px}
-.stat-card .value{font-size:28px;font-weight:700;color:#fff}
+.stat-card .value{font-size:28px;font-weight:700;color:var(--text)}
 .stat-card .value.green{color:var(--green)}
 .stat-card .value.yellow{color:var(--yellow)}
-.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px;margin-bottom:20px}
+.card{background:var(--card);border-radius:12px;padding:20px;margin-bottom:20px;box-shadow:0 1px 3px rgba(0,0,0,.3)}
 .card-title{font-size:15px;font-weight:600;margin-bottom:16px;display:flex;align-items:center;gap:8px}
 table{width:100%;border-collapse:collapse}
 th{text-align:left;font-size:12px;color:var(--text2);font-weight:500;padding:10px 12px;border-bottom:1px solid var(--border)}
@@ -48,9 +48,9 @@ tr:hover td{background:rgba(201,169,110,.04)}
 .actions-cell{display:flex;gap:6px}
 .settings-row{display:flex;align-items:center;gap:12px;margin-bottom:12px}
 .settings-row label{width:120px;font-size:13px;color:var(--text2);flex-shrink:0}
-.settings-row input{flex:1;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:8px 12px;color:var(--text);font-size:13px;outline:none;max-width:300px}
-.settings-row input:focus{border-color:var(--accent)}
-.btn-primary-custom{background:var(--accent);color:#fff;border:none;padding:6px 16px;border-radius:6px;font-size:12px;font-weight:500;cursor:pointer}
+.settings-row input{flex:1;background:#131313;border:1px solid var(--border);border-radius:8px;padding:8px 12px;color:var(--text);font-size:13px;outline:none;max-width:300px}
+.settings-row input:focus{border-color:var(--accent);box-shadow:0 0 0 2px rgba(201,169,110,.15)}
+.btn-primary-custom{background:var(--accent);color:#111;border:none;padding:6px 16px;border-radius:6px;font-size:12px;font-weight:500;cursor:pointer}
 .btn-primary-custom:hover{background:#a8893a}
 </style>
 </head>
@@ -75,6 +75,16 @@ tr:hover td{background:rgba(201,169,110,.04)}
 <div class="card">
   <div class="card-title">实时监测活动</div>
   <div id="sessionsTable"></div>
+</div>
+
+<div class="card">
+  <div class="card-title">注册码管理</div>
+  <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
+    <label style="font-size:13px;color:var(--text2)">生成数量：</label>
+    <input type="number" id="codeCount" value="1" min="1" max="100" style="width:80px;background:#131313;border:1px solid var(--border);border-radius:6px;padding:6px 10px;color:var(--text);font-size:13px">
+    <button class="btn-sm btn-primary-custom" onclick="generateCodes()">生成注册码</button>
+  </div>
+  <div id="codesTable"></div>
 </div>
 
 <div class="card">
@@ -175,6 +185,7 @@ async function loadData() {
   renderSessions(sessions);
   document.getElementById('refreshTime').textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN', {hour12: false});
   loadSettings();
+  loadInviteCodes();
 }
 
 async function loadSettings() {
@@ -224,6 +235,53 @@ async function stopMonitor(username) {
   });
   toast(r.msg || (r.ok ? '操作成功' : '操作失败'), r.ok);
   loadData();
+}
+
+async function loadInviteCodes() {
+  var r = await api('/api/admin/invite-codes');
+  if (!r.ok) return;
+  renderCodes(r.data || []);
+}
+
+function renderCodes(codes) {
+  if (!codes.length) {
+    document.getElementById('codesTable').innerHTML = '<div class="empty">暂无注册码，点击上方按钮生成</div>';
+    return;
+  }
+  var html = '<table><thead><tr><th>注册码</th><th>生成时间</th><th>状态</th><th>使用者</th><th>使用时间</th><th>操作</th></tr></thead><tbody>';
+  codes.forEach(function(c) {
+    var status = c.used
+      ? '<span class="badge badge-offline">已使用</span>'
+      : '<span class="badge badge-online">未使用</span>';
+    var delBtn = c.used
+      ? '<button class="btn-sm btn-danger" onclick="deleteCode(\'' + c.code + '\')">删除</button>'
+      : '<button class="btn-sm btn-danger" onclick="deleteCode(\'' + c.code + '\')">删除</button>';
+    html += '<tr><td style="font-family:monospace;font-weight:600;letter-spacing:1px">' + c.code + '</td><td>' + c.created_at + '</td><td>' + status + '</td><td>' + (c.used_by || '-') + '</td><td>' + (c.used_at || '-') + '</td><td>' + delBtn + '</td></tr>';
+  });
+  html += '</tbody></table>';
+  document.getElementById('codesTable').innerHTML = html;
+}
+
+async function generateCodes() {
+  var count = parseInt(document.getElementById('codeCount').value) || 1;
+  var r = await api('/api/admin/invite-codes/generate', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({count: count})
+  });
+  toast(r.msg || (r.ok ? '生成成功' : '生成失败'), r.ok);
+  if (r.ok) loadInviteCodes();
+}
+
+async function deleteCode(code) {
+  if (!confirm('确定删除注册码 ' + code + '？')) return;
+  var r = await api('/api/admin/invite-codes/delete', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({code: code})
+  });
+  toast(r.msg || (r.ok ? '已删除' : '删除失败'), r.ok);
+  loadInviteCodes();
 }
 
 loadData();
